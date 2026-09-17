@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getProjectByUser, updateProject } from "@dai/db";
 import { getUserFromRequest } from "@/lib/auth";
+import { requireCsrf, generateCsrfToken } from "@/lib/csrf";
 import { FreestyleClient } from "@dai/freestyle";
 
 function getEnv(name: string): string {
@@ -9,10 +10,10 @@ function getEnv(name: string): string {
   return val;
 }
 
-export async function POST(
+const _startPreview = async (
   request: NextRequest,
   { params }: { params: Promise<{ projectId: string }> }
-) {
+) => {
   try {
     const { projectId } = await params;
     const user = getUserFromRequest(request);
@@ -50,4 +51,6 @@ export async function POST(
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
-}
+};
+
+export const POST = requireCsrf(_startPreview);

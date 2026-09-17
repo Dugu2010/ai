@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserSettings, upsertUserSettings as updateUserSettings } from "@dai/db";
 import { getUserFromRequest } from "@/lib/auth";
+import { requireCsrf, generateCsrfToken } from "@/lib/csrf";
+import { MAX_REQUEST_BODY_SIZE } from "@/lib/size-limits";
 
 function getEnv(name: string): string {
   const val = process.env[name];
@@ -41,10 +43,15 @@ export async function GET(request: NextRequest) {
   }
 }
 
-export async function POST(request: NextRequest) {
+const _updateSettings = async (request: NextRequest) => {
   try {
     const user = getUserFromRequest(request);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const contentLength = request.headers.get("content-length");
+    if (contentLength && parseInt(contentLength) > MAX_REQUEST_BODY_SIZE) {
+      return NextResponse.json({ error: "Request body exceeds maximum size" }, { status: 413 });
+    }
 
     const body = await request.json();
     const { nimModel, nimBaseUrl, apiKey } = body;
@@ -65,4 +72,6 @@ export async function POST(request: NextRequest) {
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
-}
+};
+
+export const POST = requireCsrf(_updateSettings);

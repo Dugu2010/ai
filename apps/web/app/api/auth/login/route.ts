@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createUser, getUserByEmail } from "@dai/db";
+import { createUser, getUserByEmailWithPassword } from "@dai/db";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
+import { checkRateLimit, recordFailedAttempt, resetRateLimit } from "../../../../lib/rate-limit";
+import { MAX_REQUEST_BODY_SIZE } from "../../../../lib/size-limits";
 
-function simpleJwt(payload: { userId: string; email: string }): string {
+function simpleJwt(payload: { userId: string; email: string; exp: number; iss: string }): string {
   const JWT_SECRET = process.env.JWT_SECRET;
   if (!JWT_SECRET) throw new Error("JWT_SECRET environment variable not set");
   const base64UrlEncode = (str: string) => 
@@ -18,25 +20,42 @@ function simpleJwt(payload: { userId: string; email: string }): string {
 
 export async function POST(request: NextRequest) {
   try {
+    const rateLimit = checkRateLimit(request);
+    if (rateLimit.limited) {
+      return NextResponse.json(
+        { error: "Too many failed attempts. Please try again later.", retryAfter: rateLimit.retryAfter },
+        { status: 429 }
+      );
+    }
+
     const { email, password, name } = await request.json();
 
     if (!email || !password) {
       return NextResponse.json({ error: "Email and password required" }, { status: 400 });
     }
 
-    const existing = await getUserByEmail(email);
-    let userId: string;
-    if (existing) {
-      userId = existing.id;
-    } else {
-      const hashed = await bcrypt.hash(password, 10);
-      const user = await createUser(email, name || null, hashed);
-      userId = user.id;
+    const existing = await getUserByEmailWithPassword(email);
+    if (!existing) {
+      recordFailedAttempt(request);
+      return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
     }
 
-    const token = simpleJwt({ userId, email });
+    const valid = await bcrypt.compare(password, existing.password_hash);
+    if (!valid) {
+      recordFailedAttempt(request);
+      return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
+    }
 
-    const response = NextResponse.json({ userId, email, token });
+    const contentLength = request.headers.get("content-length");
+    if (contentLength && parseInt(contentLength) > MAX_REQUEST_BODY_SIZE) {
+      return NextResponse.json({ error: "Request body exceeds maximum size" }, { status: 413 });
+    }
+
+    resetRateLimit(request);
+    const now = Math.floor(Date.now() / 1000);
+    const token = simpleJwt({ userId: existing.id, email: existing.email, exp: now + 604800, iss: "dai-auth" });
+
+    const response = NextResponse.json({ userId: existing.id, email: existing.email, token });
     response.headers.set("Set-Cookie", `auth_token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${604800}`);
     return response;
   } catch (error: any) {

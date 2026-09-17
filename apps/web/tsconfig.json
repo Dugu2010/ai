@@ -4,6 +4,7 @@
     "plugins": [{ "name": "next" }],
     "incremental": true,
     "noEmit": true,
+    "skipLibCheck": true,
     "baseUrl": ".",
     "paths": {
       "@/*": ["./*"]

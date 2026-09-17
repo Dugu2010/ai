@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getProjectByUser } from "@dai/db";
 import { getUserFromRequest } from "@/lib/auth";
 import { FreestyleClient } from "@dai/freestyle";
+import { validatePath } from "@/lib/path-validation";
+import { MAX_FILE_READ_SIZE } from "@/lib/size-limits";
 
 function getEnv(name: string): string {
   const val = process.env[name];
@@ -30,13 +32,18 @@ export async function GET(
     const { searchParams } = new URL(request.url);
     const path = searchParams.get("path") || "/workspace";
 
-    if (!path.startsWith("/workspace")) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
+     const validation = validatePath(path);
+     if (!validation.valid || !validation.normalized) {
+       return NextResponse.json({ error: validation.error || "Access denied" }, { status: 403 });
+     }
 
-    const content = await client.readFile(path);
+     const content = await client.readFile(validation.normalized);
     if (content === null) {
       return NextResponse.json({ error: "File not found" }, { status: 404 });
+    }
+
+    if (content.length > MAX_FILE_READ_SIZE) {
+      return NextResponse.json({ error: "File exceeds maximum read size" }, { status: 400 });
     }
 
     return new Response(content, {

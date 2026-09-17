@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getProjectByUser, getActiveConversation, listMessages, addMessage, upsertUserSettings as updateUserSettings, getUserSettings, pool, createConversation } from "@dai/db";
 import { NIMClient, ToolDefinition, ToolChoice, ChatMessage } from "@dai/nim";
 import { getUserFromRequest } from "@/lib/auth";
+import { requireCsrf, generateCsrfToken } from "@/lib/csrf";
 
 function getEnv(name: string): string {
   const val = process.env[name];
@@ -172,10 +173,10 @@ const TOOLS: ToolDefinition[] = [
   },
 ];
 
-export async function POST(
+const _agentChat = async (
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
-) {
+) => {
   try {
     const { id } = await params;
     const user = getUserFromRequest(request);
@@ -247,4 +248,6 @@ export async function POST(
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
-}
+};
+
+export const POST = requireCsrf(_agentChat);

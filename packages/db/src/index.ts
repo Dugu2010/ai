@@ -81,6 +81,29 @@ export async function getUserByEmail(email: string): Promise<User | null> {
   };
 }
 
+export async function getUserByEmailWithPassword(email: string): Promise<{
+  id: string;
+  email: string;
+  name: string | null;
+  password_hash: string;
+  created_at: string;
+  updated_at: string;
+} | null> {
+  const res = await query<{
+    id: string;
+    email: string;
+    name: string | null;
+    password_hash: string;
+    created_at: string;
+    updated_at: string;
+  }>(
+    `SELECT id, email, name, password_hash, created_at, updated_at FROM users WHERE email = $1`,
+    [email]
+  );
+  if (!res.rows[0]) return null;
+  return res.rows[0];
+}
+
 export async function getUserById(id: string): Promise<User | null> {
   const res = await query<{
     id: string;

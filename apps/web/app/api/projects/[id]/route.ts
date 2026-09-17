@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { pool, getProjectByUser } from "@dai/db";
 import { getUserFromRequest } from "@/lib/auth";
+import { requireCsrf, generateCsrfToken } from "@/lib/csrf";
 import { FreestyleClient } from "@dai/freestyle";
+import { MAX_REQUEST_BODY_SIZE } from "@/lib/size-limits";
 
 function getEnv(name: string): string {
   const val = process.env[name];
@@ -27,10 +29,10 @@ export async function GET(
   }
 }
 
-export async function DELETE(
+const _deleteProject = async (
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
-) {
+) => {
   try {
     const { id } = await params;
     const user = getUserFromRequest(request);
@@ -50,4 +52,6 @@ export async function DELETE(
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
-}
+};
+
+export const DELETE = requireCsrf(_deleteProject);
