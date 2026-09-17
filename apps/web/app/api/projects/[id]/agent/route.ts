@@ -174,14 +174,14 @@ const TOOLS: ToolDefinition[] = [
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: Promise<{ projectId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { projectId } = await params;
+    const { id } = await params;
     const user = getUserFromRequest(request);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    const project = await getProjectByUser(projectId, user.userId);
+    const project = await getProjectByUser(id, user.userId);
     if (!project || !project.vmId) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
     }
@@ -205,11 +205,11 @@ export async function POST(
 
     let convId = conversationId;
     if (!convId) {
-      const existingConv = await getActiveConversation(projectId);
+      const existingConv = await getActiveConversation(id);
       if (existingConv) {
         convId = existingConv.id;
       } else {
-        const newConv = await createConversation(projectId, { title: "New conversation", model: "deepseek-ai/deepseek-r7" });
+        const newConv = await createConversation(id, { title: "New conversation", model: "deepseek-ai/deepseek-r7" });
         convId = newConv.id;
       }
     }
