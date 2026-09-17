@@ -4,14 +4,14 @@ import { getUserFromRequest } from "@/lib/auth";
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: Promise<{ projectId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { projectId } = await params;
+    const { id } = await params;
     const user = getUserFromRequest(request);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    const conv = await getActiveConversation(projectId);
+    const conv = await getActiveConversation(id);
     return NextResponse.json(conv as any);
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
@@ -20,10 +20,10 @@ export async function GET(
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: Promise<{ projectId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { projectId } = await params;
+    const { id } = await params;
     const user = getUserFromRequest(request);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
@@ -34,7 +34,7 @@ export async function POST(
       return NextResponse.json({ error: "title required" }, { status: 400 });
     }
 
-    const conv = await createConversation(projectId, { title, model: model || "deepseek-ai/deepseek-r7" });
+    const conv = await createConversation(id, { title, model: model || "deepseek-ai/deepseek-r7" });
     return NextResponse.json(conv as any);
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
