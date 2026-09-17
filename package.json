@@ -1,0 +1,25 @@
+{
+  "name": "dai",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "build": "npm run build -w packages/types && npm run build -w packages/db && npm run build -w packages/freestyle && npm run build -w packages/nim && npm run build -w packages/ui && npm run build -w apps/web",
+    "dev": "npm run dev -w apps/web",
+    "typecheck": "npm run typecheck -w packages/types && npm run typecheck -w packages/db && npm run typecheck -w packages/freestyle && npm run typecheck -w packages/nim && npm run typecheck -w packages/ui && npm run typecheck -w apps/web",
+    "lint": "npm run lint -w apps/web",
+    "start:postgres": "docker compose up -d postgres",
+    "stop:postgres": "docker compose down"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsup": "^8.2.0",
+    "eslint": "^9.17.0",
+    "prettier": "^3.3.3",
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.31",
+    "tailwindcss": "^3.4.0",
+    "dotenv": "^16.4.5"
+  },
+  "engines": { "node": ">=20" }
+}
