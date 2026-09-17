@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getProjectByUser, getActiveConversation, listMessages, addMessage, upsertUserSettings as updateUserSettings, getUserSettings, pool, createConversation } from "@dai/db";
+import type { ChatMessage } from "@dai/types";
 import { NIMClient, ToolDefinition, ToolChoice, ChatMessage } from "@dai/nim";
 import { getUserFromRequest } from "@/lib/auth";
 import { requireCsrf, generateCsrfToken } from "@/lib/csrf";
@@ -219,7 +220,7 @@ const _agentChat = async (
 
     const messages: ChatMessage[] = [
       { role: "system", content: "You are a coding assistant working on a project. The project files are located under /workspace. Use the available tools to inspect, edit, and run commands. Return results concisely. Never expose chain-of-thought." },
-      ...history.slice(-50).map((m) => ({
+      ...history.slice(-50).map((m: ChatMessage) => ({
         role: m.role as "system" | "user" | "assistant",
         content: m.content || "",
       })),
