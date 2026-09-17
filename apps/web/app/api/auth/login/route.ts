@@ -3,12 +3,6 @@ import { createUser, getUserByEmail } from "@dai/db";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 
-function getEnv(name: string): string {
-  const val = process.env[name];
-  if (!val) throw new Error(`Missing environment variable: ${name}`);
-  return val;
-}
-
 function simpleJwt(payload: { userId: string; email: string }): string {
   const JWT_SECRET = process.env.JWT_SECRET;
   if (!JWT_SECRET) throw new Error("JWT_SECRET environment variable not set");
