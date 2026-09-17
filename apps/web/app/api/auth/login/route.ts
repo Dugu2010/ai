@@ -9,11 +9,11 @@ function getEnv(name: string): string {
   return val;
 }
 
-const JWT_SECRET = getEnv("JWT_SECRET");
-
 function simpleJwt(payload: { userId: string; email: string }): string {
+  const JWT_SECRET = process.env.JWT_SECRET;
+  if (!JWT_SECRET) throw new Error("JWT_SECRET environment variable not set");
   const base64UrlEncode = (str: string) => 
-    Buffer.from(str).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+    Buffer.from(str).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/_/g, "_");
   const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const payload64 = base64UrlEncode(JSON.stringify(payload));
   const signature = base64UrlEncode(
