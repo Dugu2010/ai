@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { getToken, fetchAuth } from "../../../lib/auth-client";
+import { isAuthenticated, fetchApi } from "../../../lib/api-client";
 import { useToast, showToast } from "../../../components/toast";
 import { CommandPalette, getDefaultProjectCommands } from "../../../components/command-palette";
 
@@ -143,8 +143,7 @@ function useAuthRedirect() {
   const pathname = usePathname();
 
   useEffect(() => {
-    const token = getToken();
-    if (!token && pathname !== "/auth/login") {
+    if (!isAuthenticated() && pathname !== "/auth/login") {
       router.replace("/auth/login");
     }
   }, [router, pathname]);
@@ -181,7 +180,7 @@ export default function ProjectPage() {
 
   const fetchProject = useCallback(async () => {
     try {
-      const res = await fetchAuth(`/api/projects/${projectId}`);
+      const res = await fetchApi(`/api/projects/${projectId}`);
       const data = await res.json();
       setProject(data as Project);
       if ((data as any).previewUrl) setPreviewUrl((data as any).previewUrl);
@@ -195,7 +194,7 @@ export default function ProjectPage() {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetchAuth(`/api/workspace/${projectId}/status`);
+      const res = await fetchApi(`/api/workspace/${projectId}/status`);
       const data = await res.json();
       setStatus(data as Status);
       if ((data as any).previewUrl) setPreviewUrl((data as any).previewUrl);
@@ -205,7 +204,7 @@ export default function ProjectPage() {
   const fetchFiles = useCallback(async (path = "/workspace") => {
     setFetchingFiles(true);
     try {
-      const res = await fetchAuth(`/api/workspace/${projectId}?path=${encodeURIComponent(path)}`);
+      const res = await fetchApi(`/api/workspace/${projectId}?path=${encodeURIComponent(path)}`);
       const data = await res.json();
       setFiles(data as FileEntry[]);
     } catch {}
@@ -216,7 +215,7 @@ export default function ProjectPage() {
 
   const fetchFile = useCallback(async (path: string) => {
     try {
-      const res = await fetchAuth(`/api/workspace/${projectId}/file?path=${encodeURIComponent(path)}`);
+      const res = await fetchApi(`/api/workspace/${projectId}/file?path=${encodeURIComponent(path)}`);
       const content = await res.text();
       setFileContent(content);
     } catch {}
@@ -234,7 +233,7 @@ export default function ProjectPage() {
     setMessages((prev) => [...prev, { id: streamingId, role: "streaming", content: "" }]);
     
     try {
-      const res = await fetchAuth(`/api/projects/${projectId}/agent`, {
+      const res = await fetchApi(`/api/projects/${projectId}/agent`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: userMessage.content }),
@@ -269,7 +268,7 @@ export default function ProjectPage() {
     if (!selectedFile || saving) return;
     setSaving(true);
     try {
-      const res = await fetchAuth(`/api/workspace/${projectId}`, {
+      const res = await fetchApi(`/api/workspace/${projectId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "write", path: selectedFile, content: fileContent }),
@@ -289,7 +288,7 @@ export default function ProjectPage() {
   const startPreview = useCallback(async () => {
     if (!project) return;
     try {
-      const res = await fetchAuth(`/api/workspace/${projectId}/preview`, {
+      const res = await fetchApi(`/api/workspace/${projectId}/preview`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ command: "npm run dev", port: 3000 }),

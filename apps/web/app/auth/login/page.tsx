@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { isAuthenticated } from "../../../lib/auth-client";
+import { isAuthenticated } from "../../../lib/api-client";
 
 interface ValidationErrors {
   email?: string;

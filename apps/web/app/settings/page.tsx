@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { getAuthState, isAuthenticated, logout as logoutUser } from "../../lib/auth-client";
+import { isAuthenticated, logout, fetchApi } from "../../lib/api-client";
 import { getTheme, toggleTheme, THEME_STORAGE_KEY } from "../../lib/theme";
 
 function useDebounce<T>(value: T, delay: number): T {
@@ -41,19 +41,22 @@ export default function SettingsPage() {
     if (typeof window === "undefined") return;
 
     const checkAuth = async () => {
-      const auth = getAuthState();
-      if (!auth.token) {
+      const auth = isAuthenticated();
+      if (!auth) {
         router.push("/auth/login");
         return;
       }
-      setEmail(auth.email || "");
-      setUserId(auth.userId || "");
       try {
-        const res = await fetch("/api/settings");
+        const res = await fetchApi("/api/settings");
         if (!res.ok) {
           throw new Error("Failed to fetch settings");
         }
         const data = await res.json();
+        setEmail(data.email || "");
+        setUserId(data.userId || "");
+        setBaseUrl(data.baseUrl || "");
+        setModelName(data.model || "");
+        setIsApiKeySet(!!data.apiKeySet);
         setBaseUrl(data.baseUrl || "");
         setModelName(data.model || "");
         setIsApiKeySet(!!data.apiKeySet);
@@ -113,7 +116,7 @@ export default function SettingsPage() {
 
   const handleLogout = async () => {
     try {
-      await logoutUser();
+      await logout();
       router.push("/auth/login");
     } catch {
       router.push("/auth/login");

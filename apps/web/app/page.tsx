@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { getToken, clearToken } from "../lib/auth-client";
+import { isAuthenticated, fetchApi, logout } from "../lib/api-client";
 import { PageSkeleton, ProjectSkeleton } from "../components/loading-skeleton";
 
 interface Project {
@@ -29,8 +29,7 @@ export default function HomePage() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {
-    const token = getToken();
-    if (!token && pathname !== "/auth/login") {
+    if (!isAuthenticated() && pathname !== "/auth/login") {
       router.replace("/auth/login");
     } else {
       setAuthLoading(false);
@@ -40,7 +39,7 @@ export default function HomePage() {
   const fetchProjects = async () => {
     setError("");
     try {
-      const res = await fetch("/api/projects");
+      const res = await fetchApi("/api/projects");
       if (res.ok) {
         const data = await res.json();
         setProjects(data);
@@ -65,9 +64,8 @@ export default function HomePage() {
     setCreating(true);
     setError("");
     try {
-      const res = await fetch("/api/projects", {
+      const res = await fetchApi("/api/projects", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ slug: newSlug, name: newName }),
       });
       if (!res.ok) {
@@ -89,7 +87,7 @@ export default function HomePage() {
     if (!confirm("Delete this project and its VM?")) return;
     setError("");
     try {
-      const res = await fetch(`/api/projects/${id}`, { method: "DELETE" });
+      const res = await fetchApi(`/api/projects/${id}`, { method: "DELETE" });
       if (res.ok) {
         await fetchProjects();
       } else {
@@ -103,11 +101,9 @@ export default function HomePage() {
 
   const handleLogout = async () => {
     try {
-      await fetch("/api/auth/logout", { method: "POST" });
-      clearToken();
+      await logout();
       router.push("/auth/login");
     } catch {
-      clearToken();
       router.push("/auth/login");
     }
   };

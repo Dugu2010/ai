@@ -5,6 +5,7 @@
   "workspaces": ["packages/*", "apps/*"],
   "scripts": {
     "build": "bun run build:types && bun run build:db && bun run build:freestyle && bun run build:nim && bun run build:ui && bun run build:web",
+    "build:web": "cd apps/web && bun run build",
     "dev": "bun run dev:web",
     "typecheck": "bun run typecheck:types && bun run typecheck:db && bun run typecheck:freestyle && bun run typecheck:nim && bun run typecheck:ui && bun run typecheck:web",
     "lint": "bun run lint:web",
@@ -13,7 +14,6 @@
     "build:freestyle": "cd packages/freestyle && bun run build",
     "build:nim": "cd packages/nim && bun run build",
     "build:ui": "cd packages/ui && bun run build",
-    "build:web": "cd apps/web && bun run build",
     "dev:web": "cd apps/web && bun run dev",
     "typecheck:types": "cd packages/types && bun run typecheck",
     "typecheck:db": "cd packages/db && bun run typecheck",
