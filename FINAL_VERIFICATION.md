@@ -140,7 +140,7 @@ DAI_WORKSPACE_ROOT=/workspace
 - All 13 API routes have authentication guards
 - Path traversal protection implemented
 - JWT session handling implemented
-- Freestyle client reuses VM handles
+- Freestyle client reuse VM handles
 - NIM client has retry with exponential backoff
 - No keep-alive or polling loops found
 
