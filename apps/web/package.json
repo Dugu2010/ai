@@ -9,11 +9,11 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@dai/db": "file:../packages/db",
-    "@dai/freestyle": "file:../packages/freestyle",
-    "@dai/nim": "file:../packages/nim",
-    "@dai/types": "file:../packages/types",
-    "@dai/ui": "file:../packages/ui",
+    "@dai/db": "file:../../packages/db",
+    "@dai/freestyle": "file:../../packages/freestyle",
+    "@dai/nim": "file:../../packages/nim",
+    "@dai/types": "file:../../packages/types",
+    "@dai/ui": "file:../../packages/ui",
     "@monaco-editor/react": "^4.7.0",
     "autoprefixer": "^10.4.20",
     "bcryptjs": "^3.0.2",
