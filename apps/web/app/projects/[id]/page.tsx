@@ -200,6 +200,7 @@ export default function ProjectPage() {
   const fetchStatus = useCallback(async () => {
     try {
       const res = await fetchApi(`/api/workspace/${projectId}/status`);
+      if (!res.ok) return; // e.g. 404/409 while VM is provisioning
       const data = await res.json();
       setStatus(data as Status);
       if ((data as any).previewUrl) setPreviewUrl((data as any).previewUrl);
@@ -210,8 +211,15 @@ export default function ProjectPage() {
     setFetchingFiles(true);
     try {
       const res = await fetchApi(`/api/workspace/${projectId}?path=${encodeURIComponent(path)}`);
+      if (!res.ok) {
+        // VM not provisioned yet (409), project missing (404), etc. — the body
+        // is an error object, not a file list. Keep files empty instead of
+        // storing a non-array that later crashes files.map().
+        setFiles([]);
+        return;
+      }
       const data = await res.json();
-      setFiles(data as FileEntry[]);
+      setFiles(Array.isArray(data) ? (data as FileEntry[]) : []);
     } catch {}
     finally {
       setFetchingFiles(false);

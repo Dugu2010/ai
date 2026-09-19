@@ -42,7 +42,7 @@ export default function HomePage() {
       const res = await fetchApi("/api/projects");
       if (res.ok) {
         const data = await res.json();
-        setProjects(data);
+        setProjects(Array.isArray(data) ? data : []);
       } else {
         const err = await res.json();
         setError(err.error || "Failed to fetch projects");

@@ -123,7 +123,13 @@ export default function LoginPage() {
       setAuthState(data.token, data.email, data.userId);
       router.push("/");
     } catch (err: any) {
-      setError(err.message || "Authentication failed");
+      // fetch() throws a TypeError ("Failed to fetch") when the request never
+      // reaches the API: network error, DNS failure, or a CORS rejection.
+      setError(
+        err?.name === "TypeError"
+          ? "Cannot reach the server. Check your connection, and that the API is awake (free tiers sleep)."
+          : err?.message || "Authentication failed",
+      );
     } finally {
       setLoading(false);
     }

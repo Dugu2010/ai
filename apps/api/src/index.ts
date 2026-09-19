@@ -23,6 +23,26 @@ const corsOptions = {
     // Allow server-to-server / curl (no Origin header)
     if (!origin) return callback(null, true);
     if (allowedOrigins.length === 0) return callback(null, true); // open during setup; set ALLOWED_ORIGINS in prod
+    // Vercel preview deployments get random per-deployment subdomains
+    // (e.g. ai-38m3p7s7q-wither2.vercel.app), so they can never be fully
+    // listed. Allow any *.vercel.app origin that ends with the project's
+    // account/team suffix (wither2.vercel.app). Set VERCEL_DOMAIN_SUFFIX to
+    // change it, or leave it empty to disable the wildcard.
+    const vercelSuffix = (process.env.VERCEL_DOMAIN_SUFFIX || "wither2.vercel.app").toLowerCase();
+    try {
+      const o = new URL(origin);
+      const hostname = o.hostname.toLowerCase();
+      if (
+        vercelSuffix &&
+        o.protocol === "https:" &&
+        (hostname === vercelSuffix || hostname.endsWith("." + vercelSuffix))
+      ) {
+        return callback(null, true);
+      }
+    } catch {
+      callback(new Error("Not allowed by CORS"));
+      return;
+    }
     if (allowedOrigins.some((allowed) => {
       try {
         const a = new URL(allowed);

@@ -37,6 +37,10 @@ services:
         generateValue: true
       - key: ALLOWED_ORIGINS
         value: https://ai-web-git-master-wither2.vercel.app,https://ai-web-wither2.vercel.app
+      # Wildcard for Vercel preview deployments (ai-<hash>-wither2.vercel.app).
+      # Empty = disabled; change to your team's vercel.app suffix if it differs.
+      - key: VERCEL_DOMAIN_SUFFIX
+        value: wither2.vercel.app
       # Add these manually in the Render dashboard (secret):
       # FREESTYLE_API_KEY  — VM provisioning
       # NIM_API_KEY        — NVIDIA NIM LLM access
