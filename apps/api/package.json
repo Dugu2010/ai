@@ -11,10 +11,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@dai/db": "file:../../packages/db",
-    "@dai/freestyle": "file:../../packages/freestyle",
-    "@dai/nim": "file:../../packages/nim",
-    "@dai/types": "file:../../packages/types",
+    "@dai/db": "workspace:*",
+    "@dai/freestyle": "workspace:*",
+    "@dai/nim": "workspace:*",
+    "@dai/types": "workspace:*",
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
