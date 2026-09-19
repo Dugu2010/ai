@@ -18,7 +18,10 @@ services:
     runtime: node
     rootDir: apps/api
     plan: free
-    buildCommand: npm install && npm run build
+    # dist/ is gitignored, so the workspace packages (@dai/db, @dai/freestyle,
+    # ...) must be built on the server before the API can require them.
+    # Repo scripts use bun, so bootstrap bun first.
+    buildCommand: cd ../.. && npm install -g bun && bun install && bun run build:packages && bun run build:api
     startCommand: npm start
     healthCheckPath: /health
     envVars:
