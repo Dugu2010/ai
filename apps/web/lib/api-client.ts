@@ -12,8 +12,20 @@ interface AuthState {
 const TOKEN_KEY = 'dai_token';
 const EMAIL_KEY = 'dai_email';
 
-// API base URL from environment or defaults to local API
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || '/api';
+// API base URL from environment; falls back to same-origin (useful for local
+// dev when the API server runs alongside the frontend).
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/+$/, '');
+
+/**
+ * Resolve a backend path (with or without a leading /api) to a full URL.
+ * Always prefixes API_BASE so /api/auth/login works against the Render API.
+ */
+export function apiUrl(path: string): string {
+  const suffix = path.startsWith('/api/') || path === '/api'
+    ? path
+    : `/api${path.startsWith('/') ? path : '/' + path}`;
+  return `${API_BASE}${suffix}`;
+}
 
 /**
  * Get current authentication state from localStorage
@@ -91,8 +103,8 @@ export async function fetchApi(url: string, options?: RequestInit): Promise<Resp
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  // Build full URL - if not absolute, use API_BASE
-  const fullUrl = url.startsWith('http') ? url : `${API_BASE}${url.startsWith('/') ? url : '/' + url}`;
+  // Build full URL - always route through apiUrl so API_BASE is applied
+  const fullUrl = url.startsWith('http') ? url : apiUrl(url);
 
   const response = await fetch(fullUrl, {
     ...options,
@@ -100,8 +112,9 @@ export async function fetchApi(url: string, options?: RequestInit): Promise<Resp
     credentials: 'include', // For cookie-based auth
   });
 
-  // Handle 401 - redirect to login
-  if (response.status === 401) {
+  // Handle 401 - clear state and redirect to login (except when already there,
+  // so a failed login attempt can still show its error message)
+  if (response.status === 401 && !window.location.pathname.startsWith('/auth/login')) {
     clearAuthState();
     window.location.href = '/auth/login';
   }
@@ -135,7 +148,7 @@ export async function logout(): Promise<void> {
   try {
     const token = getToken();
     if (token) {
-      await fetch('/api/auth/logout', {
+      await fetch(apiUrl('/api/auth/logout'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         credentials: 'include',

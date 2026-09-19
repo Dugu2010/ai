@@ -94,7 +94,7 @@ export default function SettingsPage() {
       if (debouncedApiKey) {
         payload.apiKey = debouncedApiKey;
       }
-      const res = await fetch("/api/settings", {
+      const res = await fetchApi("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),

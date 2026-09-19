@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { isAuthenticated } from "../../../lib/api-client";
+import { isAuthenticated, fetchApi } from "../../../lib/api-client";
 
 interface ValidationErrors {
   email?: string;
@@ -100,18 +100,25 @@ export default function LoginPage() {
     setLoading(true);
     setErrors({});
     try {
-      const res = await fetch("/api/auth/login", {
+      const res = await fetchApi("/api/auth/login", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email,
           password,
           name: isRegister ? name : undefined,
         }),
       });
-      const data = await res.json();
+      let data: any = null;
+      try {
+        data = await res.json();
+      } catch {
+        // Non-JSON response (e.g. HTML error page from a proxy)
+      }
       if (!res.ok) {
-        throw new Error(data.error || "Authentication failed");
+        throw new Error(data?.error || `Authentication failed (${res.status})`);
+      }
+      if (!data?.token) {
+        throw new Error("Authentication failed: no token returned");
       }
       localStorage.setItem("dai_token", data.token);
       localStorage.setItem("dai_email", data.email);
