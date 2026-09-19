@@ -151,11 +151,11 @@ export default function HomePage() {
               </div>
               <nav className="hidden md:flex gap-4">
                 <a href="/" className="text-accent-primary font-medium">Dashboard</a>
-                <a href="/settings" className="text-text-secondary hover:text-primary">Settings</a>
+                <a href="/settings" className="text-secondary hover:text-primary">Settings</a>
               </nav>
             </div>
              <div className="flex items-center gap-4">
-                <div className="hidden md:flex items-center gap-2 text-text-secondary">
+                <div className="hidden md:flex items-center gap-2 text-secondary">
                   <span className="text-sm">Projects:</span>
                   <span className="text-accent-primary font-semibold">{projects.length}</span>
                 </div>
@@ -167,13 +167,13 @@ export default function HomePage() {
                 </button>
                 <button
                   onClick={handleLogout}
-                  className="text-text-secondary hover:text-primary text-sm font-medium"
+                  className="text-secondary hover:text-primary text-sm font-medium"
                 >
                   Logout
                 </button>
                 <button
                   onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-                  className="md:hidden text-text-secondary"
+                  className="md:hidden text-secondary"
                   aria-label="Toggle menu"
                 >
                   ☰
@@ -198,8 +198,7 @@ export default function HomePage() {
         <main className="max-w-7xl mx-auto px-4 md:px-6 py-8">
         <div className="mb-8 flex justify-between items-center">
           <div>
-            <h2 className="text-3xl font-bold mb-2">Projects</h2>
-             <p className="text-text-secondary">Manage your DAI projects</p>
+            <h2 className="text-3xl font-bold mb-2">Projects</h2>              <p className="text-secondary">Manage your DAI projects</p>
           </div>
           <button
             onClick={() => setShowModal(true)}
@@ -224,7 +223,7 @@ export default function HomePage() {
               <span className="text-2xl">📁</span>
             </div>
             <h3 className="text-xl font-semibold mb-2">No projects yet</h3>
-            <p className="text-text-secondary mb-6 max-w-md mx-auto">Create your first project to get started</p>
+            <p className="text-secondary mb-6 max-w-md mx-auto">Create your first project to get started</p>
             <button
               onClick={() => setShowModal(true)}
               className="px-6 py-3 bg-accent-primary text-white rounded-lg hover:bg-accent-hover font-medium transition-all hover:shadow-md"

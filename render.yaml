@@ -1,5 +1,17 @@
 # Render Blueprint for the DAI backend
 # Deploy: Render Dashboard → New → Blueprint → select this repo
+#
+# ⚠️ IMPORTANT — if your existing Render service runs the FRONTEND (symptom:
+# `Running 'cd apps/web && npx next start'` in the deploy log and the API URL
+# serving the web app), that service was created from the repo root without a
+# Root Directory. Blueprints only apply on first creation, so fix it in the
+# dashboard:
+#   Settings → Root Directory: apps/api
+#   Build Command:            npm install && npm run build
+#   Start Command:            npm start
+#   Health Check Path:        /health
+# then create a SECOND service (type: web) for apps/web only if you truly want
+# the frontend on Render too — Vercel already serves it.
 services:
   - type: web
     name: dai-api

@@ -42,9 +42,9 @@ function Tooltip({ children, content }: { children: React.ReactNode; content: st
     <div className="relative" onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
       {children}
       {show && (
-        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-bg-secondary border-border rounded text-xs text-primary whitespace-nowrap z-tooltip">
+        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-secondary border rounded text-xs text-primary whitespace-nowrap z-tooltip">
           {content}
-           <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-1 border-4 border-transparent border-t-bg-secondary" />
+           <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-1 border-4 border-transparent border-t-secondary" />
         </div>
       )}
     </div>

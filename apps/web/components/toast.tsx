@@ -20,9 +20,34 @@ interface ToastContextType {
 
 const ToastContext = createContext<ToastContextType | undefined>(undefined);
 
+/**
+ * Module-level handle to the live toast API, wired by the provider on mount.
+ * Lets non-React code (and components outside the provider tree) raise toasts
+ * through the plain `showToast(...)` helper below.
+ */
+let toastApi: ToastContextType | null = null;
+
+/** Fire a toast from anywhere — no hook rules involved. */
+export function showToast(message: string, type: ToastType = "info", duration: number = 4000) {
+  if (toastApi) {
+    toastApi.showToast(message, type, duration);
+    return;
+  }
+  // No provider mounted yet — surface in console so it's never silently lost.
+  console.warn(`[toast:${type}]`, message);
+}
+
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const timeoutsRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
+
+  // Expose the live API to the module-level `showToast` helper.
+  useEffect(() => {
+    toastApi = { toasts, showToast, dismiss, clear };
+    return () => {
+      toastApi = null;
+    };
+  });
 
   const showToast = useCallback(
     (message: string, type: ToastType = "info", duration: number = 4000) => {
@@ -133,13 +158,4 @@ export function useToast() {
     throw new Error("useToast must be used within a ToastProvider");
   }
   return context;
-}
-
-// Helper functions for convenience
-export function showToast(message: string, type: ToastType = "info", duration: number = 4000) {
-  // This will work when used with a toast instance
-  const context = useContext(ToastContext);
-  if (context) {
-    context.showToast(message, type, duration);
-  }
 }

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { isAuthenticated, fetchApi } from "../../../lib/api-client";
+import { isAuthenticated, setAuthState, fetchApi } from "../../../lib/api-client";
 
 interface ValidationErrors {
   email?: string;
@@ -120,8 +120,7 @@ export default function LoginPage() {
       if (!data?.token) {
         throw new Error("Authentication failed: no token returned");
       }
-      localStorage.setItem("dai_token", data.token);
-      localStorage.setItem("dai_email", data.email);
+      setAuthState(data.token, data.email, data.userId);
       router.push("/");
     } catch (err: any) {
       setError(err.message || "Authentication failed");
@@ -178,7 +177,7 @@ export default function LoginPage() {
   const nameError = errors.name;
 
   return (
-    <div className="min-h-screen bg-secondary flex items-center justify-center px-4">
+    <div className="min-h-screen bg-primary flex items-center justify-center px-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold text-primary mb-2">DAI</h1>
@@ -187,7 +186,7 @@ export default function LoginPage() {
           </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="bg-secondary/50 backdrop-blur rounded-2xl p-8 border border-tertiary">
+        <form onSubmit={handleSubmit} className="bg-secondary rounded-2xl p-8 border shadow-soft">
           {error && (
             <div className="mb-6 p-3 bg-red-500/10 border border-red-500/50 rounded-lg text-red-400 text-sm" role="alert">
               {error}

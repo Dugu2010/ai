@@ -6,9 +6,8 @@ import {
   listMessages,
   addMessage,
   getUserSettings,
-  upsertUserSettings,
 } from "@dai/db";
-import { NIMClient, type ToolDefinition, type ChatMessage } from "@dai/nim";
+import { NIMClient, type ToolDefinition, type ChatMessage, type ToolCall } from "@dai/nim";
 import { requireAuth, getAuthUser } from "../lib/auth.js";
 import { decrypt } from "../lib/crypto.js";
 import { NIM_API_KEY, NIM_BASE_URL, NIM_MODEL } from "../lib/env.js";
@@ -62,6 +61,22 @@ const TOOLS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "edit_file",
+      description: "Replace an exact string in a file with new content. Prefer this over rewriting whole files.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path (must start with /workspace)" },
+          oldString: { type: "string", description: "Exact text to replace (must appear exactly once ideally)" },
+          newString: { type: "string", description: "Replacement text" },
+        },
+        required: ["path", "oldString", "newString"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "delete_file",
       description: "Delete a file",
       parameters: {
@@ -75,7 +90,7 @@ const TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "rename_file",
-      description: "Rename or move a file",
+      description: "Rename or move a file or directory",
       parameters: {
         type: "object",
         properties: {
@@ -136,12 +151,12 @@ const TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "start_dev_server",
-      description: "Start a development server and expose a preview URL",
+      description: "Start (or restart) a development server and expose a public preview URL",
       parameters: {
         type: "object",
         properties: {
-          command: { type: "string", description: "Command to start server" },
-          port: { type: "number", description: "Port to use" },
+          command: { type: "string", description: "Command to start server, e.g. npm run dev" },
+          port: { type: "number", description: "Port the server listens on" },
         },
         required: ["command", "port"],
       },
@@ -157,7 +172,7 @@ const TOOLS: ToolDefinition[] = [
   },
 ];
 
-const MAX_ITERATIONS = 8;
+const MAX_ITERATIONS = 12;
 
 /** Resolve NIM config: user settings first, then env defaults. */
 async function resolveNimConfig(userId: string): Promise<{
@@ -186,6 +201,14 @@ async function resolveNimConfig(userId: string): Promise<{
     );
   }
   return { apiKey, baseURL, model };
+}
+
+function toWireToolCalls(calls: ToolCall[]) {
+  return calls.map((c) => ({
+    id: c.id,
+    type: "function" as const,
+    function: { name: c.name, arguments: JSON.stringify(c.arguments ?? {}) },
+  }));
 }
 
 /** Execute one agent tool call against the Freestyle VM. */
@@ -218,6 +241,24 @@ async function executeTool(
         if (!v.valid || !v.normalized) return { result: `Error: ${v.error}`, success: false };
         await client.writeTextFile(v.normalized, String(args.content ?? ""));
         return { result: "File written successfully", success: true };
+      }
+      case "edit_file": {
+        const v = validatePath(String(args.path ?? ""));
+        if (!v.valid || !v.normalized) return { result: `Error: ${v.error}`, success: false };
+        const oldStr = String(args.oldString ?? "");
+        const newStr = String(args.newString ?? "");
+        if (!oldStr) return { result: "Error: oldString is required", success: false };
+        const current = await client.readFile(v.normalized);
+        if (current === null) return { result: "Error: file not found", success: false };
+        const first = current.indexOf(oldStr);
+        if (first === -1) return { result: "Error: oldString not found in file", success: false };
+        const second = current.indexOf(oldStr, first + 1);
+        if (second !== -1) {
+          // Ambiguous match — require the model to include more context.
+          return { result: "Error: oldString matches multiple locations; include more surrounding text", success: false };
+        }
+        await client.writeTextFile(v.normalized, current.slice(0, first) + newStr + current.slice(first + oldStr.length));
+        return { result: "Edit applied successfully", success: true };
       }
       case "delete_file": {
         const v = validatePath(String(args.path ?? ""));
@@ -252,7 +293,7 @@ async function executeTool(
         ]
           .filter(Boolean)
           .join("\n");
-        return { result: out, success: r.exitCode === 0 };
+        return { result: out || "(no output)", success: r.exitCode === 0 };
       }
       case "search_files": {
         const dirV = validatePath(String(args.dir ?? "/workspace"));
@@ -272,16 +313,23 @@ async function executeTool(
       case "start_dev_server": {
         const command = String(args.command ?? "");
         const port = Number(args.port ?? 3000);
-        if (!command || !port) {
-          return { result: "Error: command and port required", success: false };
+        if (!command || !port || port < 1 || port > 65535) {
+          return { result: "Error: command and valid port required", success: false };
         }
-        await client.startDevServer("/workspace", command, port);
+        await client.startDevServer("/workspace", command, port, { sessionSlug: "dev-server" });
+        // Give the server a moment to boot, then report honestly.
+        const up = await client.waitForPort(port, 30_000);
         const domainSuffix = process.env.DAI_PREVIEW_DOMAIN_SUFFIX || "style.dev";
         const url = await client.getPreviewUrl(port, domainSuffix);
-        return { result: `Dev server started at ${url}`, success: true };
+        return {
+          result: up
+            ? `Dev server is up at ${url}`
+            : `Dev server process started at ${url} but the port is not answering yet — it may still be booting.`,
+          success: true,
+        };
       }
       case "stop_dev_server": {
-        await client.stopDevServer();
+        await client.stopDevServer("dev-server");
         return { result: "Dev server stopped", success: true };
       }
       default:
@@ -294,10 +342,9 @@ async function executeTool(
 
 router.post("/:id/agent", async (req: Request, res: Response) => {
   let freestyleClient: FreestyleClient | null = null;
-  let project: any = null;
   try {
     const user = getAuthUser(req);
-    project = await getProjectByUser(req.params.id!, user.userId);
+    const project = await getProjectByUser(req.params.id!, user.userId);
     if (!project) {
       res.status(404).json({ error: "Project not found" });
       return;
@@ -316,21 +363,33 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
     let vmReady = false;
     if (project.vmId && FREESTYLE_API_KEY()) {
       freestyleClient = new FreestyleClient(FREESTYLE_API_KEY());
-      await freestyleClient.refVM(project.vmId);
-      vmReady = true;
+      freestyleClient.refVM(project.vmId);
+      try {
+        const vm = await freestyleClient.getVM(project.vmId);
+        vmReady = vm?.state === "running" || vm?.state === "starting";
+        if (vm?.state === "paused" || vm?.state === "stopped") {
+          await freestyleClient.startVM();
+          vmReady = true;
+        }
+      } catch {
+        vmReady = false;
+      }
     }
 
     // Conversation
     let convId: string = conversationId;
     if (!convId) {
       const existing = await getActiveConversation(project.id);
-      convId = existing ? existing.id : (await createConversation(project.id, { title: "New conversation", model: nimConfig.model })).id;
+      convId = existing
+        ? existing.id
+        : (await createConversation(project.id, { title: "New conversation", model: nimConfig.model })).id;
     }
     const history = await listMessages(convId);
 
     const systemPrompt = [
       "You are DAI, an expert coding agent working inside a project VM.",
       "Project files live under /workspace. Use the provided tools to inspect, create, edit, and run code.",
+      "Prefer edit_file for small changes and write_file for new files.",
       "Always use tools to verify state before claiming success. Be concise and practical.",
       vmReady ? "" : "NOTE: The VM is not available right now; answer general questions but explain you cannot edit files.",
     ]
@@ -339,10 +398,13 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
 
     const messages: ChatMessage[] = [
       { role: "system", content: systemPrompt },
-      ...history.slice(-50).map((m) => ({
-        role: (m.role === "assistant" ? "assistant" : m.role === "system" ? "system" : "user") as ChatMessage["role"],
-        content: m.content || "",
-      })),
+      // Skip old tool-role messages: tools may differ from the current session's
+      // and tool_call_id pairing must stay consistent; the assistant's summary
+      // of what it did is already in the stored content.
+      ...history
+        .slice(-40)
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({ role: m.role as "user" | "assistant", content: m.content || "" })),
       { role: "user", content: message },
     ];
 
@@ -350,7 +412,7 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
 
     // Agentic loop
     let finalContent: string | null = null;
-    let allToolCalls: any[] = [];
+    const allToolCalls: { name: string; arguments: Record<string, unknown>; success: boolean; result?: string }[] = [];
 
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
       const response = await nim.chat({ messages, tools: vmReady ? TOOLS : undefined });
@@ -363,18 +425,28 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
         break;
       }
 
-      // Execute tools
-      const toolMessages: ChatMessage[] = [];
+      // Record the assistant's tool request verbatim (wire format), then
+      // answer each call with a proper role:"tool" message carrying its
+      // tool_call_id — the OpenAI-compatible contract NIM follows.
+      messages.push({
+        role: "assistant",
+        content: response.content ?? null,
+        tool_calls: toWireToolCalls(response.toolCalls),
+      });
+
       for (const call of response.toolCalls) {
         const { result, success } = await executeTool(freestyleClient!, call.name, call.arguments);
-        allToolCalls.push({ name: call.name, arguments: call.arguments, success });
-        toolMessages.push({
-          role: "user",
-          content: `[Tool ${call.name} ${success ? "succeeded" : "failed"}]\n${result.slice(0, 4000)}`,
+        allToolCalls.push({ name: call.name, arguments: call.arguments, success, result: result.slice(0, 500) });
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: result.slice(0, 8000),
         });
       }
-      messages.push({ role: "assistant", content: response.content || "", });
-      messages.push(...toolMessages);
+    }
+
+    if (!finalContent && allToolCalls.length > 0) {
+      finalContent = `Completed ${allToolCalls.length} tool operation${allToolCalls.length === 1 ? "" : "s"}.`;
     }
 
     await addMessage(convId, {

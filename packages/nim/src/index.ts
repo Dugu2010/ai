@@ -1,6 +1,19 @@
+/** OpenAI-compatible assistant tool_call, as sent back in message history. */
+export interface WireToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+  /** Assistant messages may carry the tool calls they requested. */
+  tool_calls?: WireToolCall[];
+  /** Tool-role messages must name the call they answer. */
+  tool_call_id?: string;
+  /** Optional display name (some providers accept it). */
+  name?: string;
 }
 
 export interface ToolCall {
@@ -154,11 +167,26 @@ export class NIMClient {
 
     let toolCalls: ToolCall[] = [];
     if (message?.tool_calls && Array.isArray(message.tool_calls)) {
-      toolCalls = message.tool_calls.map((tc: any) => ({
-        id: tc.id,
-        name: tc.function?.name,
-        arguments: tc.function?.arguments,
-      }));
+      toolCalls = message.tool_calls.map((tc: any, i: number) => {
+        // OpenAI-compatible providers return `arguments` as a JSON *string*;
+        // normalize to an object so callers never parse provider quirks.
+        let args: Record<string, unknown> = {};
+        const raw = tc.function?.arguments;
+        if (typeof raw === "string" && raw.trim()) {
+          try {
+            args = JSON.parse(raw);
+          } catch {
+            args = {};
+          }
+        } else if (raw && typeof raw === "object") {
+          args = raw;
+        }
+        return {
+          id: typeof tc.id === "string" && tc.id ? tc.id : `call_${i}`,
+          name: tc.function?.name ?? "",
+          arguments: args,
+        };
+      });
     }
 
     let usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };

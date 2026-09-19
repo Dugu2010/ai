@@ -31,12 +31,11 @@ export default function SettingsPage() {
   const [apiKey, setApiKey] = useState("");
   const [isApiKeySet, setIsApiKeySet] = useState(false);
 
-  // Debounced values for auto-save
+  // Debounced values for save (explicit Save button only — no auto-save,
+  // which previously fired an empty POST immediately after load)
   const debouncedBaseUrl = useDebounce(baseUrl, 700);
   const debouncedModelName = useDebounce(modelName, 700);
   const debouncedApiKey = useDebounce(apiKey, 700);
-  const loadedRef = useRef(false);
-  const skipSaveRef = useRef(true); // don't auto-save the values we just loaded
 
   // Auth redirect + settings fetch
   useEffect(() => {
@@ -58,8 +57,6 @@ export default function SettingsPage() {
         setError(err.message || "Failed to load settings");
       } finally {
         setLoading(false);
-        // Allow auto-save only after the first paint of loaded values
-        setTimeout(() => (skipSaveRef.current = false), 300);
       }
     })();
   }, [router]);
@@ -68,17 +65,16 @@ export default function SettingsPage() {
     setTheme(getTheme());
   }, []);
 
-  // Auto-save when debounced values settle (after initial load)
-  const handleSave = useCallback(async (payloadOverride?: { baseUrl?: string; model?: string; apiKey?: string }) => {
+  // Save only when the user presses Save.
+  const handleSave = useCallback(async () => {
     setSaving(true);
     setError("");
     try {
       const payload: Record<string, string> = {
-        baseUrl: payloadOverride?.baseUrl ?? debouncedBaseUrl,
-        model: payloadOverride?.model ?? debouncedModelName,
+        baseUrl: debouncedBaseUrl,
+        model: debouncedModelName,
       };
-      const key = payloadOverride?.apiKey ?? debouncedApiKey;
-      if (key) payload.apiKey = key;
+      if (debouncedApiKey) payload.apiKey = debouncedApiKey;
       const res = await fetchApi("/api/settings", {
         method: "POST",
         body: JSON.stringify(payload),
@@ -87,7 +83,7 @@ export default function SettingsPage() {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || "Failed to save settings");
       }
-      if (key) {
+      if (debouncedApiKey) {
         setIsApiKeySet(true);
         setApiKey("");
       }
@@ -98,12 +94,6 @@ export default function SettingsPage() {
     } finally {
       setSaving(false);
     }
-  }, [debouncedBaseUrl, debouncedModelName, debouncedApiKey]);
-
-  useEffect(() => {
-    if (loading || skipSaveRef.current) return;
-    handleSave();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedBaseUrl, debouncedModelName, debouncedApiKey]);
 
   const handleLogout = async () => {
