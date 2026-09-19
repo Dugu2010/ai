@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "workspaces": ["packages/*", "apps/*"],
   "scripts": {
-    "build": "bun run build:types && bun run build:db && bun run build:freestyle && bun run build:nim && bun run build:ui && bun run build:web",
+    "build": "bun run build:packages && bun run build:web",
+    "build:packages": "bun run build:types && bun run build:db && bun run build:freestyle && bun run build:nim && bun run build:ui",
     "build:web": "cd apps/web && bun run build",
     "dev": "bun run dev:web",
     "typecheck": "bun run typecheck:types && bun run typecheck:db && bun run typecheck:freestyle && bun run typecheck:nim && bun run typecheck:ui && bun run typecheck:web",

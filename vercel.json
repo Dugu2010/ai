@@ -1,4 +1,5 @@
 {
   "$schema": "https://vercel.com/schemas/builds/v1",
-  "installCommand": "bun install && bun run build"
+  "installCommand": "bun install",
+  "buildCommand": "bun run build"
 }
