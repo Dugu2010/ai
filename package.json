@@ -4,11 +4,13 @@
   "version": "0.1.0",
   "workspaces": ["packages/*", "apps/*"],
   "scripts": {
-    "build": "bun run build:packages && bun run build:web",
+    "build": "bun run build:packages && bun run build:web && bun run build:api",
     "build:packages": "bun run build:types && bun run build:db && bun run build:freestyle && bun run build:nim && bun run build:ui",
     "build:web": "cd apps/web && bun run build",
+    "build:api": "cd apps/api && bun run build",
     "dev": "bun run dev:web",
-    "typecheck": "bun run typecheck:types && bun run typecheck:db && bun run typecheck:freestyle && bun run typecheck:nim && bun run typecheck:ui && bun run typecheck:web",
+    "dev:api": "cd apps/api && bun run dev",
+    "typecheck": "bun run typecheck:types && bun run typecheck:db && bun run typecheck:freestyle && bun run typecheck:nim && bun run typecheck:ui && bun run typecheck:web && bun run typecheck:api",
     "lint": "bun run lint:web",
     "build:types": "cd packages/types && bun run build",
     "build:db": "cd packages/db && bun run build",
@@ -22,6 +24,7 @@
     "typecheck:nim": "cd packages/nim && bun run typecheck",
     "typecheck:ui": "cd packages/ui && bun run typecheck",
     "typecheck:web": "cd apps/web && bun run typecheck",
+    "typecheck:api": "cd apps/api && bun run typecheck",
     "lint:web": "cd apps/web && bun run lint"
   },
   "devDependencies": {

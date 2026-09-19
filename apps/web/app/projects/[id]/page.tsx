@@ -9,7 +9,8 @@ import { CommandPalette, getDefaultProjectCommands } from "../../../components/c
 interface FileEntry {
   name: string;
   path: string;
-  type: "file" | "directory";
+  kind: "file" | "directory";
+  size?: number;
 }
 
 interface Message {
@@ -181,6 +182,10 @@ export default function ProjectPage() {
   const fetchProject = useCallback(async () => {
     try {
       const res = await fetchApi(`/api/projects/${projectId}`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error((data as any).error || `Failed to load project (${res.status})`);
+      }
       const data = await res.json();
       setProject(data as Project);
       if ((data as any).previewUrl) setPreviewUrl((data as any).previewUrl);
@@ -235,10 +240,12 @@ export default function ProjectPage() {
     try {
       const res = await fetchApi(`/api/projects/${projectId}/agent`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: userMessage.content }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `Agent request failed (${res.status})`);
+      }
       if (data.message) {
         // Update streaming message with final content
         setMessages((prev) =>
@@ -270,12 +277,14 @@ export default function ProjectPage() {
     try {
       const res = await fetchApi(`/api/workspace/${projectId}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "write", path: selectedFile, content: fileContent }),
       });
       if (res.ok) {
         await fetchFiles();
         showToast("File saved successfully", "success");
+      } else {
+        const data = await res.json().catch(() => ({}));
+        showToast(data.error || "Failed to save file", "error");
       }
     } catch (err: any) {
       setError(err.message || "Failed to save file");
@@ -290,15 +299,18 @@ export default function ProjectPage() {
     try {
       const res = await fetchApi(`/api/workspace/${projectId}/preview`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ command: "npm run dev", port: 3000 }),
       });
-      if (res.url) {
-        setPreviewUrl(res.url);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to start preview");
+      if (data.url) {
+        setPreviewUrl(data.url);
         await fetchStatus();
         showToast("Preview started", "success");
       }
-    } catch {}
+    } catch {
+      showToast("Failed to start preview", "error");
+    }
   }, [project, fetchStatus, showToast]);
 
   const handleRetry = () => {
@@ -390,7 +402,7 @@ export default function ProjectPage() {
         </div>
       </div>
 
-      <div ref={overlayRef} className="flex-1 relative">
+      <div ref={overlayRef} className="flex-1 relative flex flex-col">
         {/* Mobile sidebar overlay */}
         {showSidebar && (
           <div className="fixed inset-0 z-40 md:hidden">
@@ -456,12 +468,12 @@ export default function ProjectPage() {
           </div>
         )}
 
-        <div className="flex flex-col lg:flex-row h-full">
+        <div className="flex flex-col lg:flex-row flex-1 min-h-0">
           {/* Desktop sidebar */}
-          <aside className="hidden lg:block w-64 border-r border-slate-700 bg-slate-850 flex flex-col flex-shrink-0">
-            <div className="p-4 border-b border-slate-700">
+          <aside className="hidden lg:flex w-64 border-r bg-secondary flex-col flex-shrink-0">
+            <div className="p-4 border-b">
               <h2 className="font-semibold">{project.name}</h2>
-              <p className="text-sm text-slate-400">{project.slug}</p>
+              <p className="text-sm text-muted">{project.slug}</p>
             </div>
             <div className="flex-1 overflow-auto p-4">
                    <h3 className="text-sm font-medium text-muted mb-2 flex items-center gap-2">
@@ -496,15 +508,15 @@ export default function ProjectPage() {
                     </li>
                   ))}
                   {files.length === 0 && (
-                    <li className="text-sm text-slate-500">No files yet</li>
+                    <li className="text-sm text-muted">No files yet</li>
                   )}
                 </ul>
               )}
             </div>
-            <div className="p-4 border-t border-slate-700">
+            <div className="p-4 border-t">
               <button
                 onClick={startPreview}
-                className="w-full px-3 py-2 bg-emerald-600 rounded-lg hover:bg-emerald-700 text-sm transition-colors"
+                className="w-full px-3 py-2 bg-emerald-600 rounded-lg hover:bg-emerald-700 text-white text-sm transition-colors"
               >
                 Start Preview
               </button>
@@ -543,7 +555,7 @@ export default function ProjectPage() {
                 <div className="h-full flex flex-col">
                   <div className="p-2 border-b border-tertiary flex justify-between items-center bg-secondary">
                     <Tooltip content={selectedFile || "No file selected"}>
-                      <span className="text-sm text-slate-400 truncate font-mono">
+                      <span className="text-sm text-muted truncate font-mono">
                         {selectedFile || "No file selected"}
                       </span>
                     </Tooltip>

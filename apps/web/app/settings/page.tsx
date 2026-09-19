@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { isAuthenticated, logout, fetchApi } from "../../lib/api-client";
-import { getTheme, toggleTheme, THEME_STORAGE_KEY } from "../../lib/theme";
+import { getTheme, toggleTheme, type Theme } from "../../lib/theme";
 
 function useDebounce<T>(value: T, delay: number): T {
   const [debouncedValue, setDebouncedValue] = useState(value);
@@ -21,7 +21,7 @@ export default function SettingsPage() {
   const [success, setSuccess] = useState("");
   const [error, setError] = useState("");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [theme, setTheme] = useState<"light" | "dark">("dark");
+  const [theme, setTheme] = useState<Theme>("dark");
 
   // Settings state
   const [email, setEmail] = useState("");
@@ -32,31 +32,25 @@ export default function SettingsPage() {
   const [isApiKeySet, setIsApiKeySet] = useState(false);
 
   // Debounced values for auto-save
-  const debouncedBaseUrl = useDebounce(baseUrl, 500);
-  const debouncedModelName = useDebounce(modelName, 500);
-  const debouncedApiKey = useDebounce(apiKey, 500);
+  const debouncedBaseUrl = useDebounce(baseUrl, 700);
+  const debouncedModelName = useDebounce(modelName, 700);
+  const debouncedApiKey = useDebounce(apiKey, 700);
+  const loadedRef = useRef(false);
+  const skipSaveRef = useRef(true); // don't auto-save the values we just loaded
 
-  // Auth redirect and settings fetch
+  // Auth redirect + settings fetch
   useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const checkAuth = async () => {
-      const auth = isAuthenticated();
-      if (!auth) {
-        router.push("/auth/login");
-        return;
-      }
+    if (!isAuthenticated()) {
+      router.replace("/auth/login");
+      return;
+    }
+    (async () => {
       try {
         const res = await fetchApi("/api/settings");
-        if (!res.ok) {
-          throw new Error("Failed to fetch settings");
-        }
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed to fetch settings");
         const data = await res.json();
         setEmail(data.email || "");
         setUserId(data.userId || "");
-        setBaseUrl(data.baseUrl || "");
-        setModelName(data.model || "");
-        setIsApiKeySet(!!data.apiKeySet);
         setBaseUrl(data.baseUrl || "");
         setModelName(data.model || "");
         setIsApiKeySet(!!data.apiKeySet);
@@ -64,71 +58,73 @@ export default function SettingsPage() {
         setError(err.message || "Failed to load settings");
       } finally {
         setLoading(false);
+        // Allow auto-save only after the first paint of loaded values
+        setTimeout(() => (skipSaveRef.current = false), 300);
       }
-    };
-
-    checkAuth();
+    })();
   }, [router]);
 
   useEffect(() => {
     setTheme(getTheme());
   }, []);
 
-  // Auto-save on debounce changes
-  useEffect(() => {
-    if (typeof window === "undefined" || loading) return;
-    if (!saving && !success) {
-      handleSave();
-    }
-  }, [debouncedBaseUrl, debouncedModelName, debouncedApiKey]);
-
-  const handleSave = async () => {
+  // Auto-save when debounced values settle (after initial load)
+  const handleSave = useCallback(async (payloadOverride?: { baseUrl?: string; model?: string; apiKey?: string }) => {
     setSaving(true);
     setError("");
-    setSuccess("");
     try {
-      const payload: any = {
-        baseUrl: debouncedBaseUrl,
-        model: debouncedModelName,
+      const payload: Record<string, string> = {
+        baseUrl: payloadOverride?.baseUrl ?? debouncedBaseUrl,
+        model: payloadOverride?.model ?? debouncedModelName,
       };
-      if (debouncedApiKey) {
-        payload.apiKey = debouncedApiKey;
-      }
+      const key = payloadOverride?.apiKey ?? debouncedApiKey;
+      if (key) payload.apiKey = key;
       const res = await fetchApi("/api/settings", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || "Failed to save settings");
       }
-      setSuccess("Settings saved successfully");
-      setTimeout(() => {
-        setSuccess("");
-        setSaving(false);
-      }, 2000);
+      if (key) {
+        setIsApiKeySet(true);
+        setApiKey("");
+      }
+      setSuccess("Settings saved");
+      setTimeout(() => setSuccess(""), 2000);
     } catch (err: any) {
       setError(err.message || "Failed to save settings");
+    } finally {
       setSaving(false);
     }
-  };
+  }, [debouncedBaseUrl, debouncedModelName, debouncedApiKey]);
+
+  useEffect(() => {
+    if (loading || skipSaveRef.current) return;
+    handleSave();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedBaseUrl, debouncedModelName, debouncedApiKey]);
 
   const handleLogout = async () => {
     try {
       await logout();
-      router.push("/auth/login");
-    } catch {
+    } finally {
       router.push("/auth/login");
     }
+  };
+
+  const handleToggleTheme = () => {
+    const next = toggleTheme();
+    setTheme(next);
   };
 
   if (loading) {
     return (
       <div className="min-h-screen bg-primary text-primary flex items-center justify-center">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mx-auto mb-4"></div>
-          <p className="text-gray-400">Loading settings...</p>
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-accent-primary mx-auto mb-4" />
+          <p className="text-muted">Loading settings...</p>
         </div>
       </div>
     );
@@ -136,168 +132,145 @@ export default function SettingsPage() {
 
   return (
     <div className="min-h-screen bg-primary text-primary">
-      <header className="border-b border-[color:var(--border-color)] bg-primary/80 backdrop-blur sticky top-0 z-50">
+      <header className="border-b glass sticky top-0 z-50">
         <div className="max-w-4xl mx-auto px-4 py-4">
           <div className="flex justify-between items-center">
             <div className="flex items-center gap-4">
-              <button
-                 onClick={() => router.back()}
-                className="text-text-secondary hover:text-primary"
-                aria-label="Go back"
-              >
+              <button onClick={() => router.push("/")} className="btn-ghost" aria-label="Go back">
                 ←
               </button>
               <h1 className="text-2xl font-bold">Settings</h1>
             </div>
             <div className="flex items-center gap-3">
               <button
-                onClick={toggleTheme}
+                onClick={handleToggleTheme}
                 aria-label={`Switch to ${theme === "light" ? "dark" : "light"} theme`}
-                className="p-2 rounded-lg border border-gray-700 hover:bg-gray-800 transition-colors"
+                className="btn-ghost"
                 title={`Switch to ${theme === "light" ? "dark" : "light"} theme`}
               >
-                {theme === "light" ? (
-                  <span aria-hidden="true">🌙</span>
-                ) : (
-                  <span aria-hidden="true">☀️</span>
-                )}
+                {theme === "light" ? <span aria-hidden="true">🌙</span> : <span aria-hidden="true">☀️</span>}
               </button>
-            </div>
-            <button
-              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="md:hidden text-text-secondary"
-              aria-label="Toggle menu"
-            >
-              ☰
-            </button>
-          </div>
-          {mobileMenuOpen && (
-            <div className="md:hidden mt-4 flex flex-col gap-2">
               <button
-                onClick={() => { router.back(); setMobileMenuOpen(false); }}
-                className="px-4 py-2 bg-gray-800 rounded text-left"
+                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                className="md:hidden btn-ghost"
+                aria-label="Toggle menu"
               >
-                ← Back
+                ☰
               </button>
             </div>
-          )}
+          </div>
         </div>
       </header>
-      <main className="max-w-4xl mx-auto px-4 py-8 space-y-8">
-        {/* Profile Section */}
-        <section className="bg-secondary rounded-lg border border-[color:var(--border-color)] p-4 md:p-6">
-          <h2 className="text-lg md:text-xl font-semibold mb-4">Profile</h2>
+
+      <main className="max-w-4xl mx-auto px-4 py-8 space-y-6">
+        {/* Profile */}
+        <section className="card animate-fade-in-up">
+          <h2 className="text-lg font-semibold mb-4">Profile</h2>
           <div className="space-y-4">
             <div>
               <label className="block text-secondary text-sm mb-1">Email</label>
-              <input
-                type="email"
-                value={email}
-                disabled
-                className="w-full px-4 py-2 bg-tertiary border border-[color:var(--border-color)] rounded-lg text-muted"
-              />
+              <input type="email" value={email} disabled readOnly className="input opacity-70" />
             </div>
             <div>
               <label className="block text-secondary text-sm mb-1">User ID</label>
-              <input
-                type="text"
-                value={userId}
-                disabled
-                className="w-full px-4 py-2 bg-tertiary border border-[color:var(--border-color)] rounded-lg text-muted"
-              />
+              <input type="text" value={userId} disabled readOnly className="input opacity-70 font-mono text-xs" />
             </div>
           </div>
         </section>
 
-        {/* NIM Configuration Section */}
-        <section className="bg-secondary rounded-lg border border-[color:var(--border-color)] p-4 md:p-6">
-          <h2 className="text-lg md:text-xl font-semibold mb-4">NIM Configuration</h2>
-          <div className="space-y-6">
+        {/* NIM Configuration */}
+        <section className="card animate-fade-in-up" style={{ animationDelay: "60ms" }}>
+          <h2 className="text-lg font-semibold mb-4">NIM Configuration</h2>
+          <div className="space-y-5">
             <div>
-              <label className="block text-secondary text-sm font-medium mb-2">
-                Model Selection
-              </label>
+              <label htmlFor="model" className="block text-secondary text-sm font-medium mb-2">Model</label>
               <input
+                id="model"
                 type="text"
                 value={modelName}
                 onChange={(e) => setModelName(e.target.value)}
                 placeholder="e.g., meta/llama-3.1-405b-instruct"
-                className="w-full px-4 py-2 bg-tertiary border border-[color:var(--border-color)] rounded-lg focus:outline-none focus:border-[color:var(--accent-primary)]"
+                className="input"
               />
-              <p className="text-muted text-sm mt-1">
-                Enter the NVIDIA NIM model name. Pre-populated from server if available.
-              </p>
+              <p className="text-muted text-sm mt-1">NVIDIA NIM model used by the agent for this account.</p>
             </div>
             <div>
-              <label className="block text-secondary text-sm font-medium mb-2">
-                Base URL
-              </label>
+              <label htmlFor="baseUrl" className="block text-secondary text-sm font-medium mb-2">Base URL</label>
               <input
+                id="baseUrl"
                 type="text"
                 value={baseUrl}
                 onChange={(e) => setBaseUrl(e.target.value)}
                 placeholder="https://integrate.api.nvidia.com/v1"
-                className="w-full px-4 py-2 bg-tertiary border border-[color:var(--border-color)] rounded-lg focus:outline-none focus:border-[color:var(--accent-primary)]"
+                className="input"
               />
-              <p className="text-muted text-sm mt-1">
-                Custom base URL for NVIDIA NIM endpoint.
-              </p>
+              <p className="text-muted text-sm mt-1">OpenAI-compatible endpoint for NIM.</p>
             </div>
           </div>
         </section>
 
-        {/* API Key Section */}
-        <section className="bg-secondary rounded-lg border border-[color:var(--border-color)] p-4 md:p-6">
-          <h2 className="text-lg md:text-xl font-semibold mb-4">API Key</h2>
+        {/* API Key */}
+        <section className="card animate-fade-in-up" style={{ animationDelay: "120ms" }}>
+          <h2 className="text-lg font-semibold mb-4">API Key</h2>
           <p className="text-secondary mb-4 text-sm">
-            Your NVIDIA NIM API key is encrypted and stored securely on the server. It is never exposed to the browser in decrypted form.
+            Your NVIDIA NIM API key is encrypted (AES-256-GCM) and stored on the server.
+            It is never sent back to the browser.
           </p>
-          <div className="mb-4">
-            <label className="block text-secondary text-sm font-medium mb-2">
-              API Key
-            </label>
+          <label htmlFor="apiKey" className="block text-secondary text-sm font-medium mb-2">API Key</label>
+          <div className="flex gap-2">
             <input
+              id="apiKey"
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder={isApiKeySet ? "••••••••••••••••" : "Enter your NVIDIA NIM API key"}
-              className="w-full px-4 py-2 bg-tertiary border border-[color:var(--border-color)] rounded-lg focus:outline-none focus:border-[color:var(--accent-primary)]"
+              placeholder={isApiKeySet ? "•••••••••••••••• (configured)" : "Enter your NVIDIA NIM API key"}
+              className="input"
+              autoComplete="off"
             />
-            <p className="text-muted text-sm mt-2">
-              {isApiKeySet ? (
-                <span className="text-green-400">✓ API key is configured</span>
-              ) : (
-                "Leave blank to keep current key"
-              )}
-            </p>
+            <button onClick={() => handleSave()} disabled={saving} className="btn-primary whitespace-nowrap">
+              {saving ? "Saving..." : "Save"}
+            </button>
           </div>
+          <p className="text-muted text-sm mt-2">
+            {isApiKeySet ? (
+              <span className="text-emerald-500">✓ API key is configured</span>
+            ) : (
+              "Paste your key and press Save"
+            )}
+          </p>
         </section>
 
-        {/* Session Section */}
-        <section className="bg-secondary rounded-lg border border-[color:var(--border-color)] p-4 md:p-6">
-          <h2 className="text-lg md:text-xl font-semibold mb-4">Session</h2>
-          <button
-            onClick={handleLogout}
-            className="px-4 py-2 bg-red-600 rounded-lg hover:bg-red-700 text-primary text-sm font-medium"
-          >
-            Logout
-          </button>
+        {/* Session */}
+        <section className="card animate-fade-in-up" style={{ animationDelay: "180ms" }}>
+          <h2 className="text-lg font-semibold mb-4">Session</h2>
+          <button onClick={handleLogout} className="btn-danger">Logout</button>
         </section>
 
-        {/* Feedback Messages */}
-        {error && (
-          <div className="p-4 bg-red-500/10 border border-red-500/50 rounded-lg text-red-400 text-sm">
-            {error}
-          </div>
-        )}
-        {success && !error && (
-          <div className="p-4 bg-green-500/10 border border-green-500/50 rounded-lg text-green-400 text-sm">
-            {success}
-          </div>
-        )}
-        {saving && !success && (
-          <div className="p-4 bg-yellow-500/10 border border-yellow-500/50 rounded-lg text-yellow-400 text-sm">
-            Saving settings...
+        {/* Feedback */}
+        <div aria-live="polite">
+          {error && (
+            <div className="p-4 bg-red-500/10 border border-red-500/40 rounded-lg text-red-500 text-sm animate-fade-in">
+              {error}
+            </div>
+          )}
+          {success && !error && (
+            <div className="p-4 bg-emerald-500/10 border border-emerald-500/40 rounded-lg text-emerald-500 text-sm animate-fade-in">
+              ✓ {success}
+            </div>
+          )}
+          {saving && !success && (
+            <div className="p-4 bg-amber-500/10 border border-amber-500/40 rounded-lg text-amber-600 dark:text-amber-400 text-sm animate-fade-in">
+              Saving…
+            </div>
+          )}
+        </div>
+
+        {mobileMenuOpen && (
+          <div className="fixed inset-0 z-50 md:hidden" onClick={() => setMobileMenuOpen(false)}>
+            <div className="absolute inset-0 bg-black/50" />
+            <div className="absolute right-0 top-0 h-full w-64 bg-primary border-l p-4">
+              <button onClick={handleLogout} className="btn-danger w-full">Logout</button>
+            </div>
           </div>
         )}
       </main>

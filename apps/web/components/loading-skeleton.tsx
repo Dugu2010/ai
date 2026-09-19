@@ -8,17 +8,12 @@ interface SkeletonProps {
 }
 
 export function Skeleton({ className, style }: SkeletonProps) {
-  return (
-    <div
-      className={`animate-pulse bg-gray-700 rounded ${className || ""}`}
-      style={style}
-    />
-  );
+  return <div className={`skeleton ${className || ""}`} style={style} />;
 }
 
 export function ProjectSkeleton() {
   return (
-    <div className="p-4 bg-gray-800 rounded border border-gray-700">
+    <div className="card animate-fade-in">
       <div className="flex justify-between items-start">
         <div className="flex-1">
           <Skeleton className="h-6 w-32 mb-2" />
@@ -36,25 +31,15 @@ export function ProjectSkeleton() {
 
 export function PageSkeleton() {
   return (
-    <div className="min-h-screen bg-gray-900 p-4">
-      <div className="max-w-4xl mx-auto">
+    <div className="min-h-screen bg-primary p-4">
+      <div className="max-w-7xl mx-auto">
         <Skeleton className="h-8 w-32 mb-8" />
-        <div className="space-y-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           <ProjectSkeleton />
           <ProjectSkeleton />
           <ProjectSkeleton />
         </div>
       </div>
-    </div>
-  );
-}
-
-export function CardSkeleton() {
-  return (
-    <div className="p-4 bg-gray-800 rounded border border-gray-700">
-      <Skeleton className="h-5 w-40 mb-2" />
-      <Skeleton className="h-4 w-full mb-2" />
-      <Skeleton className="h-4 w-2/3" />
     </div>
   );
 }

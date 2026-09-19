@@ -2,17 +2,19 @@
   "name": "@dai/db",
   "private": true,
   "version": "0.1.0",
-  "main": "./dist/index.cjs",
+  "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts --clean",
     "dev": "tsup src/index.ts --format esm,cjs --dts --watch",
@@ -21,13 +23,13 @@
   },
   "dependencies": {
     "pg": "^8.13.1",
-    "pg-format": "^1.0.4"
+    "pg-format": "^1.0.4",
+    "dotenv": "^16.4.7"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/pg": "^8.11.10",
     "@types/pg-format": "^1.0.5",
-    "dotenv": "^16.4.7",
     "tsup": "^8.2.0",
     "typescript": "^5.7.2"
   }
