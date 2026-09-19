@@ -28,6 +28,11 @@ interface Project {
   previewUrl?: string | null;
 }
 
+interface ProjectModel {
+  id: string;
+  owned_by?: string;
+}
+
 interface Status {
   state: string;
   previewUrl?: string | null;
@@ -175,6 +180,9 @@ export default function ProjectPage() {
   const [showSidebar, setShowSidebar] = useState(false);
   const [showPreview, setShowPreview] = useState(true);
   const [activeTab, setActiveTab] = useState<"files" | "chat" | "preview">("files");
+  const [models, setModels] = useState<ProjectModel[]>([]);
+  const [selectedModel, setSelectedModel] = useState("");
+  const [modelsSource, setModelsSource] = useState<"provider" | "fallback" | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
@@ -233,6 +241,37 @@ export default function ProjectPage() {
       setFileContent(content);
     } catch {}
   }, [projectId]);
+
+  const fetchModels = useCallback(async () => {
+    try {
+      const res = await fetchApi("/api/settings/models");
+      if (!res.ok) return;
+      const data = await res.json();
+      const list: ProjectModel[] = Array.isArray(data?.models) ? data.models : [];
+      setModels(list);
+      if (data?.source === "provider" || data?.source === "fallback") setModelsSource(data.source);
+      // Preselect the account's saved model if the list contains it.
+      const settingsRes = await fetchApi("/api/settings");
+      if (settingsRes.ok) {
+        const s = await settingsRes.json();
+        if (s.model && list.some((m) => m.id === s.model)) setSelectedModel(s.model);
+      }
+    } catch {}
+  }, []);
+
+  /** Persist the selected model for this account (used by the agent + new conversations). */
+  const saveModel = useCallback(async (modelId: string) => {
+    try {
+      const res = await fetchApi("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({ model: modelId }),
+      });
+      if (!res.ok) throw new Error();
+      showToast(`Model set to ${modelId}`, "success");
+    } catch {
+      showToast("Failed to save model selection", "error");
+    }
+  }, [showToast]);
 
   const sendMessage = useCallback(async () => {
     if (!input.trim() || sending) return;
@@ -335,8 +374,9 @@ export default function ProjectPage() {
     if (project) {
       fetchStatus();
       fetchFiles();
+      fetchModels();
     }
-  }, [project, fetchStatus, fetchFiles]);
+  }, [project, fetchStatus, fetchFiles, fetchModels]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -620,6 +660,30 @@ export default function ProjectPage() {
                     <div ref={messagesEndRef} />
                   </div>
                   <div className="p-4 border-t border-tertiary bg-secondary">
+                    <div className="flex items-center gap-2 mb-2">
+                      <label htmlFor="model-select" className="text-xs text-muted whitespace-nowrap">Model</label>
+                      <select
+                        id="model-select"
+                        value={selectedModel}
+                        onChange={(e) => {
+                          setSelectedModel(e.target.value);
+                          if (e.target.value) saveModel(e.target.value);
+                        }}
+                        className="flex-1 max-w-xs px-2 py-1 bg-primary border border-tertiary rounded-lg text-xs outline-none focus:border-accent-primary"
+                        title={modelsSource === "fallback" ? "Provider unreachable — showing static list" : "Model used by the agent"}
+                      >
+                        {selectedModel && !models.some((m) => m.id === selectedModel) && (
+                          <option value={selectedModel}>{selectedModel}</option>
+                        )}
+                        {!selectedModel && <option value="">Select a model…</option>}
+                        {models.map((m) => (
+                          <option key={m.id} value={m.id}>{m.id}</option>
+                        ))}
+                      </select>
+                      {modelsSource === "fallback" && (
+                        <span className="text-xs text-amber-500" title="Could not reach provider">(cached)</span>
+                      )}
+                    </div>
                     <div className="flex gap-2">
                       <input
                         type="text"

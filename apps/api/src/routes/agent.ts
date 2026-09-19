@@ -9,8 +9,7 @@ import {
 } from "@dai/db";
 import { NIMClient, type ToolDefinition, type ChatMessage, type ToolCall } from "@dai/nim";
 import { requireAuth, getAuthUser } from "../lib/auth.js";
-import { decrypt } from "../lib/crypto.js";
-import { NIM_API_KEY, NIM_BASE_URL, NIM_MODEL } from "../lib/env.js";
+import { resolveNimConfig } from "../lib/nim-config.js";
 import { validatePath, validateCommandOptions, MAX_TIMEOUT_MS } from "../lib/validation.js";
 import { FREESTYLE_API_KEY } from "../lib/env.js";
 import { FreestyleClient } from "@dai/freestyle";
@@ -173,35 +172,6 @@ const TOOLS: ToolDefinition[] = [
 ];
 
 const MAX_ITERATIONS = 12;
-
-/** Resolve NIM config: user settings first, then env defaults. */
-async function resolveNimConfig(userId: string): Promise<{
-  apiKey: string;
-  baseURL: string;
-  model: string;
-}> {
-  let apiKey = NIM_API_KEY();
-  let baseURL = NIM_BASE_URL();
-  let model = NIM_MODEL();
-
-  const settings = await getUserSettings(userId);
-  if (settings) {
-    if (settings.nimApiKeyEnc) {
-      const decrypted = decrypt(settings.nimApiKeyEnc);
-      if (decrypted) apiKey = decrypted;
-    }
-    if (settings.nimBaseURL) baseURL = settings.nimBaseURL;
-    if (settings.nimModel) model = settings.nimModel;
-  }
-
-  if (!apiKey) {
-    throw Object.assign(
-      new Error("No NIM API key available. Set NIM_API_KEY on the backend or save one in Settings."),
-      { statusCode: 503 }
-    );
-  }
-  return { apiKey, baseURL, model };
-}
 
 function toWireToolCalls(calls: ToolCall[]) {
   return calls.map((c) => ({

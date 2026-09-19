@@ -3,6 +3,7 @@ import { getUserSettings, upsertUserSettings } from "@dai/db";
 import { requireAuth, getAuthUser } from "../lib/auth.js";
 import { encrypt, decrypt } from "../lib/crypto.js";
 import { NIM_BASE_URL, NIM_MODEL } from "../lib/env.js";
+import { resolveNimConfig } from "../lib/nim-config.js";
 import { MAX_REQUEST_BODY_SIZE } from "../lib/validation.js";
 
 const router = Router();
@@ -71,6 +72,50 @@ router.post("/", async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("[settings:POST]", error.message);
     res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/settings/models
+ * Proxies the configured provider's OpenAI-compatible /models endpoint so the
+ * project UI can show a live model list. Falls back to a static list if the
+ * provider is unreachable.
+ */
+const FALLBACK_MODELS: { id: string; owned_by?: string }[] = [
+  { id: "meta/llama-3.1-405b-instruct", owned_by: "nvidia" },
+  { id: "meta/llama-3.3-70b-instruct", owned_by: "nvidia" },
+  { id: "deepseek-ai/deepseek-r1", owned_by: "deepseek" },
+  { id: "qwen/qwen2.5-coder-32b-instruct", owned_by: "qwen" },
+];
+
+router.get("/models", async (req: Request, res: Response) => {
+  try {
+    const user = getAuthUser(req);
+    const config = await resolveNimConfig(user.userId);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const upstream = await fetch(`${config.baseURL.replace(/\/+$/, "")}/models`, {
+        headers: { Authorization: `Bearer ${config.apiKey}` },
+        signal: controller.signal,
+      });
+      if (!upstream.ok) {
+        throw new Error(`Provider returned ${upstream.status}`);
+      }
+      const data: any = await upstream.json();
+      const models = Array.isArray(data?.data)
+        ? data.data
+            .map((m: any) => ({ id: String(m?.id ?? ""), owned_by: m?.owned_by }))
+            .filter((m: { id: string }) => m.id)
+        : FALLBACK_MODELS;
+      res.json({ models, source: "provider" });
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (error: any) {
+    console.warn("[settings:models] falling back to static list:", error.message);
+    res.json({ models: FALLBACK_MODELS, source: "fallback" });
   }
 });
 
