@@ -49,6 +49,8 @@ interface Status {
   state: string;
   previewUrl?: string | null;
   lastActivity?: string;
+  isHibernated?: boolean;
+  lastError?: string | null;
   agentState?: "idle" | "working" | "thinking";
 }
 
@@ -86,39 +88,150 @@ function FileIcon({ fileName }: { fileName: string }) {
   return icons[ext] || icons.folder;
 }
 
-// Agent activity indicator
-function AgentIndicator({ state }: { state?: Status["agentState"] }) {
-  if (state === "working") {
-    return (
-      <Tooltip content="Agent is working">
-        <div className="flex items-center gap-1.5" style={{ color: "var(--success)" }}>
-          <div className="w-2 h-2 rounded-full animate-pulse" style={{ background: "var(--success)" }} />
-          <span className="text-xs font-medium">Working</span>
-        </div>
-      </Tooltip>
-    );
-  }
-  if (state === "thinking") {
-    return (
-      <Tooltip content="Agent is thinking">
-         <div className="flex items-center gap-1.5 text-accent-primary">
-           <div className="flex gap-0.5">
-             <div className="w-1.5 h-1.5 bg-accent-primary rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-             <div className="w-1.5 h-1.5 bg-accent-primary rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-             <div className="w-1.5 h-1.5 bg-accent-primary rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
-           </div>
-          <span className="text-xs font-medium">Thinking</span>
-        </div>
-      </Tooltip>
-    );
+// Unified sandbox status pill — the ONE status indicator (A4). Client-side
+// unification when multiple fields disagree: error > provisioning >
+// running/hibernated > idle.
+function SandboxPill({ status }: { status: Status | null }) {
+  let label = "Idle";
+  let color = "var(--text-muted)";
+  let bg = "var(--bg-tertiary)";
+  if (status?.lastError) {
+    label = "Error";
+    color = "var(--danger)";
+    bg = "color-mix(in srgb, var(--danger) 12%, transparent)";
+  } else if (status?.state === "provisioning") {
+    label = "Provisioning…";
+    color = "var(--warning)";
+    bg = "color-mix(in srgb, var(--warning) 12%, transparent)";
+  } else if (status?.state === "running" && status?.isHibernated) {
+    label = "Hibernated";
+  } else if (status?.state === "running") {
+    label = "Running";
+    color = "var(--success)";
+    bg = "color-mix(in srgb, var(--success) 12%, transparent)";
   }
   return (
-    <Tooltip content="Agent is idle">
-        <div className="flex items-center gap-1.5 text-muted">
-         <div className="w-2 h-2 bg-muted rounded-full" />
-        <span className="text-xs">Idle</span>
-      </div>
-    </Tooltip>
+    <span className="badge" style={{ background: bg, color }} title="Sandbox status">
+      <span className="w-1.5 h-1.5 rounded-full" style={{ background: color }} />
+      {label}
+    </span>
+  );
+}
+
+// Model IDs → display labels (A3). Unknown ids fall back to a prettified id.
+const MODEL_LABELS: Record<string, string> = {
+  "openai/gpt-oss-20b": "GPT-OSS 20B",
+  "openai/gpt-oss-120b": "GPT-OSS 120B",
+  "meta/llama-3.3-70b": "Llama 3.3 70B",
+};
+
+function modelLabel(id: string): string {
+  return MODEL_LABELS[id] ?? id.split("/").pop()?.replace(/[-_]/g, " ") ?? id;
+}
+
+// Compact model dropdown styled after the command palette chrome
+// (bg-card + shadow-elevated + border) — replaces the full-width native select
+// that used to sit between the chat and the input row.
+function ModelPicker({
+  models,
+  value,
+  source,
+  disabled,
+  onSelect,
+}: {
+  models: ProjectModel[];
+  value: string;
+  source: "provider" | "fallback" | null;
+  disabled?: boolean;
+  onSelect: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const options: ProjectModel[] =
+    value && !models.some((m) => m.id === value) ? [{ id: value }, ...models] : models;
+
+  return (
+    <div ref={rootRef} className="relative flex-shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label="Select model"
+        className="flex items-center gap-2 px-3 min-h-[44px] rounded-lg border border-tertiary bg-primary text-xs whitespace-nowrap hover:bg-secondary transition-colors disabled:opacity-50"
+        title={source === "fallback" ? "Provider unreachable — showing cached list" : "Model used by the agent"}
+      >
+        <span style={{ color: "var(--text-secondary)" }}>{value ? modelLabel(value) : "Model"}</span>
+        <svg
+          className={`w-3.5 h-3.5 transition-transform ${open ? "rotate-180" : ""}`}
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {open && (
+        <div
+          role="listbox"
+          aria-label="Models"
+          className="absolute bottom-full right-0 mb-2 w-56 max-h-64 overflow-auto rounded-lg border border-tertiary z-50"
+          style={{ background: "var(--bg-card)", boxShadow: "var(--shadow-elevated)" }}
+        >
+          {options.length === 0 && (
+            <p className="px-3 py-3 text-xs" style={{ color: "var(--text-muted)" }}>No models available</p>
+          )}
+          {options.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              role="option"
+              aria-selected={m.id === value}
+              onClick={() => {
+                onSelect(m.id);
+                setOpen(false);
+              }}
+              className="w-full flex items-center justify-between gap-2 px-3 py-2.5 min-h-[44px] text-left text-xs hover:bg-secondary transition-colors"
+              style={{ color: m.id === value ? "var(--accent-primary)" : "var(--text-secondary)" }}
+            >
+              <span>{modelLabel(m.id)}</span>
+              {m.id === value && (
+                <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              )}
+            </button>
+          ))}
+          {source === "fallback" && (
+            <p className="px-3 py-2 text-[11px] border-t border-tertiary" style={{ color: "var(--warning)" }}>
+              Provider unreachable — cached list
+            </p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -589,11 +702,12 @@ export default function ProjectPage() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
             </svg>
           </button>
-           <span className="text-muted">Project: {project.name}</span>
-          <AgentIndicator state={status?.agentState} />
+           <Tooltip content={project.name}>
+            <span className="text-muted truncate max-w-[240px]">Project: {project.name}</span>
+          </Tooltip>
+          <SandboxPill status={status} />
         </div>
-         <div className="flex items-center gap-4 text-muted">
-          <span>{status?.state || "Ready"}</span>
+         <div className="flex items-center gap-4 pr-4 text-muted">
           <span>Last activity: {status?.lastActivity || "Just now"}</span>
           <ThemeToggle />
         </div>
@@ -765,7 +879,18 @@ export default function ProjectPage() {
                       {saving ? "Saving..." : "Save"}
                     </button>
                   </div>
-                  {isNarrowViewport ? (
+                  {status?.state === "provisioning" && files.length === 0 ? (
+                    /* A9: never a blank panel while the VM provisions */
+                    <div className="flex-1 flex flex-col items-center justify-center gap-4 p-4">
+                      <div className="w-full max-w-xs space-y-2">
+                        <div className="skeleton h-8" />
+                        <div className="skeleton h-8 ml-6" />
+                        <div className="skeleton h-8" />
+                        <div className="skeleton h-8 ml-6" />
+                      </div>
+                      <p className="text-sm" style={{ color: "var(--text-muted)" }}>Provisioning sandbox…</p>
+                    </div>
+                  ) : isNarrowViewport ? (
                     /* Below sm the editor is a read-only preview (2F). */
                     <pre
                       aria-label="Read-only file preview"
@@ -799,8 +924,8 @@ export default function ProjectPage() {
               )}
 
               {activeTab === "chat" && (
-                <div className="flex-1 flex flex-col">
-                  <div className="flex-1 overflow-auto p-4 space-y-4">
+                <div className="flex flex-col h-full min-h-0">
+                  <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
                     {messages.map((m) => {
                       if (m.role === "streaming") {
                         return (
@@ -834,44 +959,41 @@ export default function ProjectPage() {
                                   : { background: "var(--bg-card)" }
                               }
                             >
-                              <p className="whitespace-pre-wrap">{m.content}</p>
+                              <p className="whitespace-pre-wrap leading-relaxed">{m.content}</p>
                             </div>
                           )}
                         </div>
                       );
                     })}
                     {messages.length === 0 && (
-                       <div className="text-center text-muted py-8">
-                        <p>Start a conversation with DAI</p>
+                      <div className="flex-1 flex flex-col items-center justify-center text-center px-6">
+                        <h2 className="text-lg font-medium text-[var(--text-primary)] mb-2">
+                          Ask DAI to modify this project
+                        </h2>
+                        <p className="text-sm text-[var(--text-muted)] max-w-md mb-6">
+                          Try: "Add a button to App.tsx", "Run the tests", or "Explain the file structure"
+                        </p>
+                        <div className="flex flex-wrap gap-2 justify-center">
+                          {["List the files", "Run the tests", "Add a README"].map((prompt) => (
+                            <button
+                              key={prompt}
+                              onClick={() => setInput(prompt)}
+                              className="px-3 py-2 text-xs rounded-md border border-[var(--border-subtle)] hover:bg-[var(--bg-card)] text-[var(--text-secondary)]"
+                            >
+                              {prompt}
+                            </button>
+                          ))}
+                        </div>
+                        {status?.state === "provisioning" && (
+                          <p className="text-xs mt-6" style={{ color: "var(--warning)" }}>
+                            Sandbox is provisioning — the agent can edit files once it is ready.
+                          </p>
+                        )}
                       </div>
                     )}
                     <div ref={messagesEndRef} />
                   </div>
                   <div className="p-4 border-t border-tertiary bg-secondary">
-                    <div className="flex items-center gap-2 mb-2">
-                      <label htmlFor="model-select" className="text-xs text-muted whitespace-nowrap">Model</label>
-                      <select
-                        id="model-select"
-                        value={selectedModel}
-                        onChange={(e) => {
-                          setSelectedModel(e.target.value);
-                          if (e.target.value) saveModel(e.target.value);
-                        }}
-                        className="flex-1 max-w-xs px-2 min-h-[44px] bg-primary border border-tertiary rounded-lg text-xs outline-none focus:border-accent-primary"
-                        title={modelsSource === "fallback" ? "Provider unreachable — showing static list" : "Model used by the agent"}
-                      >
-                        {selectedModel && !models.some((m) => m.id === selectedModel) && (
-                          <option value={selectedModel}>{selectedModel}</option>
-                        )}
-                        {!selectedModel && <option value="">Select a model…</option>}
-                        {models.map((m) => (
-                          <option key={m.id} value={m.id}>{m.id}</option>
-                        ))}
-                      </select>
-                      {modelsSource === "fallback" && (
-                        <span className="text-xs" style={{ color: "var(--warning)" }} title="Could not reach provider">(cached)</span>
-                      )}
-                    </div>
                     <div className="flex gap-2">
                       <input
                         type="text"
@@ -881,6 +1003,16 @@ export default function ProjectPage() {
                         placeholder="Ask DAI..."
                           className="flex-1 px-3 min-h-[44px] bg-primary border border-tertiary rounded-lg outline-none focus:border-accent-primary"
                         disabled={sending}
+                      />
+                      <ModelPicker
+                        models={models}
+                        value={selectedModel}
+                        source={modelsSource}
+                        disabled={sending}
+                        onSelect={(id) => {
+                          setSelectedModel(id);
+                          if (id) saveModel(id);
+                        }}
                       />
                       <button
                         onClick={sendMessage}
@@ -906,7 +1038,7 @@ export default function ProjectPage() {
                   ) : (
                     <div className="flex-1 flex items-center justify-center">
                       <div className="text-center">
-                         <p className="text-muted mb-4">No preview running</p>
+                         <p className="text-muted mb-4">Start the dev server to see a preview</p>
                         <button
                           onClick={startPreview}
                           className="btn btn-primary px-6"
