@@ -182,10 +182,13 @@ function toWireToolCalls(calls: ToolCall[]) {
 }
 
 async function executeTool(
-  client: CodeSandboxClient,
+  client: CodeSandboxClient | null,
   name: string,
   args: Record<string, unknown>
 ): Promise<{ result: string; success: boolean }> {
+  if (!client) {
+    return { result: "Sandbox not available", success: false };
+  }
   try {
     switch (name) {
       case "list_files": {
@@ -307,6 +310,10 @@ async function executeTool(
   }
 }
 
+function writeSSE(res: Response, event: string, data: Record<string, unknown>): void {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
 router.post("/:id/agent", async (req: Request, res: Response) => {
   let codesandboxClient: CodeSandboxClient | null = null;
   try {
@@ -323,6 +330,12 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       return;
     }
 
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
     const nimConfig = await resolveNimConfig(user.userId);
     const nim = new NIMClient(nimConfig.apiKey, nimConfig.baseURL, nimConfig.model);
 
@@ -331,8 +344,6 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       codesandboxClient = new CodeSandboxClient(CODESANDBOX_API_KEY());
       try {
         await codesandboxClient.openSandbox(project.sandboxId);
-        // openSandbox → resumeSandbox throws on failure, so reaching this line
-        // means the sandbox is booted and the client is connected.
         sandboxReady = true;
       } catch {
         sandboxReady = false;
@@ -367,16 +378,17 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       { role: "user", content: message },
     ];
 
-    await addMessage(convId, { role: "user", content: message });
+    await addMessage(convId, { role: "user", content: message, projectId: project.id });
 
     let finalContent: string | null = null;
-    const allToolCalls: { name: string; arguments: Record<string, unknown>; success: boolean; result?: string }[] = [];
+    const allToolCalls: { id: string; name: string; arguments: Record<string, unknown>; success: boolean; result?: string }[] = [];
 
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
       const response = await nim.chat({ messages, tools: sandboxReady ? TOOLS : undefined });
 
       if (response.content) {
         finalContent = response.content;
+        writeSSE(res, "assistant_delta", { text: response.content });
       }
 
       if (response.toolCalls.length === 0 || !sandboxReady) {
@@ -388,14 +400,33 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
         content: response.content ?? null,
         tool_calls: toWireToolCalls(response.toolCalls),
       });
+      await addMessage(convId, {
+        role: "assistant",
+        content: response.content ?? null,
+      });
 
       for (const call of response.toolCalls) {
-        const { result, success } = await executeTool(codesandboxClient!, call.name, call.arguments);
-        allToolCalls.push({ name: call.name, arguments: call.arguments, success, result: result.slice(0, 500) });
-        messages.push({
+        writeSSE(res, "tool_call", { id: call.id, name: call.name, args: call.arguments });
+
+        const { result, success } = await executeTool(
+          sandboxReady ? codesandboxClient : null,
+          call.name,
+          call.arguments
+        );
+        allToolCalls.push({ id: call.id, name: call.name, arguments: call.arguments, success, result: result.slice(0, 500) });
+
+        writeSSE(res, "tool_result", {
+          id: call.id,
+          status: success ? "success" : "error",
+          preview: result.slice(0, 200),
+        });
+
+        await addMessage(convId, {
           role: "tool",
-          tool_call_id: call.id,
           content: result.slice(0, 8000),
+          toolName: call.name,
+          toolArgs: call.arguments,
+          toolResult: { success, result: result.slice(0, 8000) },
         });
       }
     }
@@ -406,19 +437,24 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
 
     await addMessage(convId, {
       role: "assistant",
-      content: finalContent,
-      toolCalls: allToolCalls.length ? allToolCalls : undefined,
+      content: finalContent || "(no content returned)",
     });
 
-    res.json({
-      conversationId: convId,
-      message: finalContent || "(no content returned)",
-      toolCalls: allToolCalls,
-    });
+    writeSSE(res, "done", { messageId: convId });
+    res.end();
   } catch (error: any) {
     console.error("[agent]", error.message);
-    const status = error.statusCode || 500;
-    res.status(status).json({ error: error.message || "Agent request failed" });
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message || "Agent request failed" });
+      return;
+    }
+    try {
+      writeSSE(res, "error", { message: error.message || "Agent request failed" });
+      writeSSE(res, "done", { messageId: "error" });
+      res.end();
+    } catch {
+      // Response already broken.
+    }
   }
 });
 
