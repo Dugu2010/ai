@@ -19,7 +19,7 @@ function b64url(input: Buffer | string): string {
     .toString("base64")
     .replace(/=/g, "")
     .replace(/\+/g, "-")
-    .replace(/_/g, "_");
+    .replace(/\//g, "_");
 }
 
 function b64urlDecode(input: string): Buffer {

@@ -11,7 +11,7 @@ import conversationRoutes from "./routes/conversations.js";
 import workspaceRoutes from "./routes/workspace.js";
 
 const app = express();
-const PORT = parseInt(process.env.PORT || "3000", 10);
+const PORT = parseInt(process.env.PORT || "4000", 10);
 
 // ---------- CORS ----------
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
@@ -76,7 +76,7 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 
 // ---------- Routes ----------
 app.get("/health", (_req: Request, res: Response) => {
-  res.json({ status: "ok", time: new Date().toISOString() });
+  res.json({ ok: true });
 });
 
 app.use("/api/auth", authRoutes);
@@ -104,8 +104,8 @@ app.use((err: Error & { statusCode?: number }, _req: Request, res: Response, _ne
 // ---------- Boot ----------
 // Listen immediately so health checks pass during DB cold starts (Render free
 // tier sleeps); connect + migrate in the background with retries.
-app.listen(PORT, () => {
-  console.log(`DAI API listening on port ${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`DAI API listening on 0.0.0.0:${PORT}`);
   console.log(`CORS origins: ${allowedOrigins.length ? allowedOrigins.join(", ") : "(open — set ALLOWED_ORIGINS)"}`);
 });
 

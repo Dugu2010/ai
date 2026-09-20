@@ -22,7 +22,7 @@ export function getEnvOrWarn(name: string, fallback: string): string {
   return val;
 }
 
-export const JWT_SECRET = () => getEnv("JWT_SECRET", "");
+export const JWT_SECRET = () => getEnv("JWT_SECRET");
 export const JWT_ISSUER = () => getEnv("JWT_ISSUER", "dai-app");
 export const JWT_EXPIRATION_SECONDS = () =>
   parseInt(process.env.JWT_EXPIRATION_SECONDS || "604800", 10); // 7 days

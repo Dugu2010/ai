@@ -2,7 +2,7 @@ import { Router, Request, Response } from "express";
 import { listProjects, createProject, getProjectByUser, updateProject, deleteProject } from "@dai/db";
 import { requireAuth, getAuthUser } from "../lib/auth.js";
 import { CODESANDBOX_API_KEY, IDLE_TIMEOUT_SECONDS } from "../lib/env.js";
-import { CodeSandboxClient } from "@dai/codesandbox";
+import { CodeSandboxClient, VMTier } from "@dai/codesandbox";
 import { MAX_REQUEST_BODY_SIZE } from "../lib/validation.js";
 import { requestSandboxSlot } from "../lib/sandbox-queue.js";
 
@@ -31,7 +31,9 @@ export async function provisionSandbox(project: { id: string; slug: string; name
   const client = codesandbox();
   const slug = sandboxSlugFor(project.slug, project.id, attempt);
   const { sandboxId, editorUrl } = await client.createSandbox(DAI_TEMPLATE_ID, {
+    vmTier: VMTier.Micro,
     hibernationTimeoutSeconds: IDLE_TIMEOUT_SECONDS(),
+    automaticWakeupConfig: { http: true, websocket: false },
     privacy: "public",
   });
   const previewUrl = editorUrl;
@@ -103,7 +105,7 @@ router.post("/", async (req: Request, res: Response) => {
     } catch (sandboxError: any) {
       console.error("[projects:POST] Sandbox provisioning failed:", sandboxError.message);
       await updateProject(project.id, { lastError: sandboxError.message });
-      res.status(201).json({ ...project, status: "provisioning", lastError: sandboxError.message });
+      res.status(503).json({ error: sandboxError.message, status: "error" });
     }
   } catch (error: any) {
     console.error("[projects:POST]", error.message);

@@ -8,7 +8,8 @@ import {
   type SandboxPrivacy,
 } from "@codesandbox/sdk";
 
-export type { Sandbox, SandboxInfo };
+export { VMTier };
+export type { Sandbox, SandboxInfo, ConnectedClient };
 
 export interface ExecResult {
   stdout: string | null;
@@ -85,8 +86,12 @@ export class CodeSandboxClient {
     this.client = client;
     this.sandboxId = sandbox.id;
 
+    // Wait until the sandbox is fully booted. `sandbox.bootupType` is the live
+    // typed getter (SandboxInfo from `sandboxes.get()` is metadata-only and has
+    // no bootupType). CLEAN/FORK boots run setup, which we wait for step by
+    // step; anything else is polled until it reports RUNNING/RESUME.
     let bootupType = sandbox.bootupType;
-    if (bootupType === "CLEAN") {
+    if (bootupType === "CLEAN" || bootupType === "FORK") {
       for (const step of client.setup.getSteps()) {
         await step.waitUntilComplete();
       }
@@ -98,8 +103,7 @@ export class CodeSandboxClient {
       await new Promise((r) => setTimeout(r, 2000));
       pollCount++;
       try {
-        const info = await this.sdk.sandboxes.get(sandbox.id);
-        bootupType = (info as any).bootupType ?? bootupType;
+        bootupType = sandbox.bootupType;
       } catch {
         break;
       }

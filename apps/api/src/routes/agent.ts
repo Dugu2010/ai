@@ -187,7 +187,7 @@ async function executeTool(
   args: Record<string, unknown>
 ): Promise<{ result: string; success: boolean }> {
   if (!client) {
-    return { result: "Sandbox not available", success: false };
+    throw Object.assign(new Error("Sandbox is not available. The project sandbox could not be reached."), { statusCode: 503 });
   }
   try {
     switch (name) {
@@ -330,6 +330,27 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       return;
     }
 
+    // Bring the sandbox up BEFORE flushing the SSE headers so an unavailable
+    // sandbox can be reported with a structured 503 JSON response instead of a
+    // half-open stream.
+    let sandboxReady = false;
+    if (project.sandboxId && CODESANDBOX_API_KEY()) {
+      codesandboxClient = new CodeSandboxClient(CODESANDBOX_API_KEY());
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          await codesandboxClient.resumeSandbox(project.sandboxId);
+          sandboxReady = true;
+          break;
+        } catch {
+          if (attempt === 0) await new Promise((r) => setTimeout(r, 1500));
+        }
+      }
+      if (!sandboxReady) {
+        res.status(503).json({ error: "Sandbox is not available. Please try again.", status: "error" });
+        return;
+      }
+    }
+
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
@@ -338,17 +359,6 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
 
     const nimConfig = await resolveNimConfig(user.userId);
     const nim = new NIMClient(nimConfig.apiKey, nimConfig.baseURL, nimConfig.model);
-
-    let sandboxReady = false;
-    if (project.sandboxId && CODESANDBOX_API_KEY()) {
-      codesandboxClient = new CodeSandboxClient(CODESANDBOX_API_KEY());
-      try {
-        await codesandboxClient.openSandbox(project.sandboxId);
-        sandboxReady = true;
-      } catch {
-        sandboxReady = false;
-      }
-    }
 
     let convId: string = conversationId;
     if (!convId) {
@@ -364,10 +374,7 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       "Project files live under /workspace. Use the provided tools to inspect, create, edit, and run code.",
       "Prefer edit_file for small changes and write_file for new files.",
       "Always use tools to verify state before claiming success. Be concise and practical.",
-      sandboxReady ? "" : "NOTE: The sandbox is not available right now; answer general questions but explain you cannot edit files.",
-    ]
-      .filter(Boolean)
-      .join(" ");
+    ].join(" ");
 
     const messages: ChatMessage[] = [
       { role: "system", content: systemPrompt },
@@ -421,6 +428,9 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
           preview: result.slice(0, 200),
         });
 
+        // Feed the tool result back to the model so it can plan the next step.
+        messages.push({ role: "tool", content: result.slice(0, 8000), tool_call_id: call.id, name: call.name });
+
         await addMessage(convId, {
           role: "tool",
           content: result.slice(0, 8000),
@@ -445,7 +455,8 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("[agent]", error.message);
     if (!res.headersSent) {
-      res.status(500).json({ error: error.message || "Agent request failed" });
+      const status = error.statusCode ?? 500;
+      res.status(status).json({ error: error.message || "Agent request failed", status: "error" });
       return;
     }
     try {
