@@ -53,6 +53,7 @@ interface Status {
   isHibernated?: boolean;
   lastError?: string | null;
   bootupType?: string | null;
+  modelId?: string;
 }
 
 interface SSEEvent {
@@ -70,6 +71,8 @@ const MODEL_LABELS: Record<string, string> = {
   "qwen/qwen2.5-coder-32b-instruct": "Qwen 2.5 Coder 32B",
   "meta/llama-3.3-70b": "Llama 3.3 70B",
 };
+
+const modelId = process.env.NEXT_PUBLIC_DAI_MODEL ?? "openai/gpt-oss-20b";
 
 function modelLabel(id: string): string {
   return MODEL_LABELS[id] ?? id.split("/").pop()?.replace(/[-_]/g, " ") ?? id;
@@ -93,6 +96,37 @@ function relativeTime(iso?: string): string {
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
   return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+const LANGUAGE_BY_EXT: Record<string, string> = {
+  ".ts": "typescript",
+  ".tsx": "typescript",
+  ".js": "javascript",
+  ".jsx": "javascript",
+  ".mjs": "javascript",
+  ".cjs": "javascript",
+  ".json": "json",
+  ".css": "css",
+  ".scss": "scss",
+  ".html": "html",
+  ".md": "markdown",
+  ".py": "python",
+  ".rb": "ruby",
+  ".go": "go",
+  ".rs": "rust",
+  ".java": "java",
+  ".sh": "shell",
+  ".yml": "yaml",
+  ".yaml": "yaml",
+  ".toml": "ini",
+  ".xml": "xml",
+  ".sql": "sql",
+};
+
+function languageForPath(path?: string | null): string | undefined {
+  if (!path) return undefined;
+  const ext = path.slice(path.lastIndexOf(".")).toLowerCase();
+  return LANGUAGE_BY_EXT[ext];
 }
 
 async function* parseSSE(stream: ReadableStream<Uint8Array>): AsyncGenerator<SSEEvent> {
@@ -482,9 +516,6 @@ export default function ProjectPage() {
 
   return (
     <div className="min-h-screen bg-primary text-primary flex flex-col overflow-x-hidden">
-      <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] btn btn-primary">
-        Skip to content
-      </a>
       <CommandPalette projectId={projectId} commands={[]} />
 
       {error && (
@@ -508,10 +539,10 @@ export default function ProjectPage() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
             </svg>
           </button>
-          <span className="text-muted truncate max-w-[200px]" style={{ fontWeight: 510 }}>{project.name}</span>
+          <span className="font-medium truncate max-w-[200px]" style={{ fontWeight: 510 }}>{project.name}</span>
           <SandboxPill status={status} />
-          <span className="text-muted" style={{ display: "none" }}>
-            Last active {relativeTime(project.lastAccessedAt)}
+          <span className="text-muted hidden md:inline">
+            · {relativeTime(project.lastAccessedAt) || "Just now"}
           </span>
         </div>
         <div className="flex items-center gap-4 pr-4 text-muted">
@@ -626,7 +657,7 @@ export default function ProjectPage() {
                   <Editor
                     height="100%"
                     theme={DAI_DARK_THEME_NAME}
-                    language={undefined}
+                    language={languageForPath(selectedFile)}
                     value={fileContent}
                     onChange={(value) => setFileContent(value ?? "")}
                     beforeMount={(monaco) => {
@@ -640,7 +671,8 @@ export default function ProjectPage() {
                       fontFamily: "JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, monospace",
                       fontSize: 13,
                       minimap: { enabled: false },
-                      readOnly: false,
+                      readOnly: isNarrowViewport,
+                      automaticLayout: true,
                     }}
                   />
                 </div>
@@ -659,6 +691,25 @@ export default function ProjectPage() {
               {/* Conversation */}
               <div className="flex-1 flex flex-col min-w-0 md:border-r border-tertiary min-h-[50%] md:min-h-0">
                 <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
+                  {messages.length === 0 && !sending && (
+                    <div className="flex flex-col items-center justify-center h-full gap-4 text-center px-2">
+                      <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                        Ask DAI to inspect the project, write code, or run commands.
+                      </p>
+                      <div className="flex flex-wrap justify-center gap-2">
+                        {["List the files", "Run the tests", "Add a README"].map((prompt) => (
+                          <button
+                            key={prompt}
+                            onClick={() => setInput(prompt)}
+                            className="btn btn-ghost text-xs"
+                            style={{ color: "var(--text-secondary)", border: "1px solid var(--border-subtle)" }}
+                          >
+                            {prompt}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {messages.map((m) => (
                     <div key={m.id} className={`flex flex-col gap-1 w-full ${m.role === "user" ? "items-end" : "items-start"}`}>
                       <div
@@ -690,6 +741,13 @@ export default function ProjectPage() {
                 {/* Input row */}
                 <div className="p-3 border-t border-tertiary bg-secondary">
                   <div className="flex gap-2">
+                    <span
+                      title={`Model: ${modelLabel(modelId)}`}
+                      className="hidden sm:inline-flex items-center px-2.5 h-[44px] shrink-0 rounded-lg font-mono text-xs border border-tertiary"
+                      style={{ color: "var(--text-muted)", background: "var(--bg-primary)" }}
+                    >
+                      {modelLabel(modelId)}
+                    </span>
                     <input
                       type="text"
                       value={input}
