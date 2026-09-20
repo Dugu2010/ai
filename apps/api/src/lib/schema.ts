@@ -90,6 +90,11 @@ export async function ensureSchema(): Promise<void> {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
+    -- Migration for existing databases created before these columns existed.
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS tool_name TEXT;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS tool_args JSONB;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS tool_result JSONB;
+
     CREATE TABLE IF NOT EXISTS user_settings (
       user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       nim_model TEXT NOT NULL DEFAULT 'meta/llama-3.1-405b-instruct',

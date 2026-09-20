@@ -616,13 +616,12 @@ export async function addMessage(
     tool_name: string | null;
     tool_args: any;
     tool_result: any;
-    message_name: string | null;
     prompt_tokens: number | null;
     completion_tokens: number | null;
     total_tokens: number | null;
     created_at: string;
   }>(
-    `INSERT INTO messages (conversation_id, project_id, role, content, tool_name, tool_args, tool_result, prompt_tokens, completion_tokens, total_tokens) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id, conversation_id, role, content, tool_name, tool_args, tool_result, message_name, prompt_tokens, completion_tokens, total_tokens, created_at`,
+    `INSERT INTO messages (conversation_id, project_id, role, content, tool_name, tool_args, tool_result, prompt_tokens, completion_tokens, total_tokens) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id, conversation_id, role, content, tool_name, tool_args, tool_result, prompt_tokens, completion_tokens, total_tokens, created_at`,
     [
       conversationId,
       projectId ?? null,
@@ -645,7 +644,6 @@ export async function addMessage(
     toolName: row.tool_name ?? undefined,
     toolArgs: row.tool_args ?? undefined,
     toolResult: row.tool_result ?? undefined,
-    name: row.message_name ?? null,
     usage: row.prompt_tokens !== null || row.completion_tokens !== null || row.total_tokens !== null
       ? { promptTokens: row.prompt_tokens ?? 0, completionTokens: row.completion_tokens ?? 0, totalTokens: row.total_tokens ?? 0 }
       : null,
@@ -662,13 +660,12 @@ export async function listMessages(conversationId: string): Promise<ChatMessage[
     tool_name: string | null;
     tool_args: any;
     tool_result: any;
-    message_name: string | null;
     prompt_tokens: number | null;
     completion_tokens: number | null;
     total_tokens: number | null;
     created_at: string;
   }>(
-    `SELECT id, conversation_id, role, content, tool_name, tool_args, tool_result, message_name, prompt_tokens, completion_tokens, total_tokens, created_at FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC`,
+    `SELECT id, conversation_id, role, content, tool_name, tool_args, tool_result, prompt_tokens, completion_tokens, total_tokens, created_at FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC`,
     [conversationId]
   );
   return res.rows.map((row) => ({
@@ -679,7 +676,6 @@ export async function listMessages(conversationId: string): Promise<ChatMessage[
     toolName: row.tool_name ?? undefined,
     toolArgs: row.tool_args ?? undefined,
     toolResult: row.tool_result ?? undefined,
-    name: row.message_name ?? null,
     usage: row.prompt_tokens !== null || row.completion_tokens !== null || row.total_tokens !== null
       ? { promptTokens: row.prompt_tokens ?? 0, completionTokens: row.completion_tokens ?? 0, totalTokens: row.total_tokens ?? 0 }
       : null,
