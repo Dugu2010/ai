@@ -162,7 +162,7 @@ export async function createProject(
   { slug, name, description }: { slug: string; name: string; description?: string }
 ): Promise<Project> {
   const res = await query(
-    `INSERT INTO projects (user_id, slug, name, description) VALUES ($1, $2, $3, $4) RETURNING id, slug, name, description, user_id, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at`,
+    `INSERT INTO projects (user_id, slug, name, description) VALUES ($1, $2, $3, $4) RETURNING id, slug, name, description, user_id, sandbox_id, sandbox_slug, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at, last_accessed_at, is_hibernated, bootup_type, is_up_to_date`,
     [userId, slug, name, description ?? null]
   );
   const row = res.rows[0]!;
@@ -172,6 +172,8 @@ export async function createProject(
     name: row.name,
     description: row.description ?? null,
     userId: row.user_id,
+    sandboxId: row.sandbox_id ?? null,
+    sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,
     status: row.status as any,
@@ -182,12 +184,16 @@ export async function createProject(
     lastError: row.last_error ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    lastAccessedAt: row.last_accessed_at ?? null,
+    isHibernated: row.is_hibernated ?? false,
+    bootupType: row.bootup_type as Project["bootupType"],
+    isUpToDate: row.is_up_to_date ?? null,
   };
 }
 
 export async function getProject(id: string): Promise<Project | null> {
   const res = await query(
-    `SELECT id, slug, name, description, user_id, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at FROM projects WHERE id = $1`,
+    `SELECT id, slug, name, description, user_id, sandbox_id, sandbox_slug, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at, last_accessed_at, is_hibernated, bootup_type, is_up_to_date FROM projects WHERE id = $1`,
     [id]
   );
   if (!res.rows[0]) return null;
@@ -198,6 +204,8 @@ export async function getProject(id: string): Promise<Project | null> {
     name: row.name,
     description: row.description ?? null,
     userId: row.user_id,
+    sandboxId: row.sandbox_id ?? null,
+    sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,
     status: row.status as any,
@@ -208,12 +216,16 @@ export async function getProject(id: string): Promise<Project | null> {
     lastError: row.last_error ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    lastAccessedAt: row.last_accessed_at ?? null,
+    isHibernated: row.is_hibernated ?? false,
+    bootupType: row.bootup_type as Project["bootupType"],
+    isUpToDate: row.is_up_to_date ?? null,
   };
 }
 
 export async function getProjectByUser(id: string, userId: string): Promise<Project | null> {
   const res = await query(
-    `SELECT id, slug, name, description, user_id, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at FROM projects WHERE id = $1 AND user_id = $2`,
+    `SELECT id, slug, name, description, user_id, sandbox_id, sandbox_slug, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at, last_accessed_at, is_hibernated, bootup_type, is_up_to_date FROM projects WHERE id = $1 AND user_id = $2`,
     [id, userId]
   );
   if (!res.rows[0]) return null;
@@ -224,6 +236,8 @@ export async function getProjectByUser(id: string, userId: string): Promise<Proj
     name: row.name,
     description: row.description ?? null,
     userId: row.user_id,
+    sandboxId: row.sandbox_id ?? null,
+    sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,
     status: row.status as any,
@@ -234,12 +248,16 @@ export async function getProjectByUser(id: string, userId: string): Promise<Proj
     lastError: row.last_error ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    lastAccessedAt: row.last_accessed_at ?? null,
+    isHibernated: row.is_hibernated ?? false,
+    bootupType: row.bootup_type as Project["bootupType"],
+    isUpToDate: row.is_up_to_date ?? null,
   };
 }
 
 export async function listProjects(userId: string): Promise<Project[]> {
   const res = await query(
-    `SELECT id, slug, name, description, user_id, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at FROM projects WHERE user_id = $1 ORDER BY created_at DESC`,
+    `SELECT id, slug, name, description, user_id, sandbox_id, sandbox_slug, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at, last_accessed_at, is_hibernated, bootup_type, is_up_to_date FROM projects WHERE user_id = $1 ORDER BY created_at DESC`,
     [userId]
   );
   return res.rows.map((row: any) => ({
@@ -248,6 +266,8 @@ export async function listProjects(userId: string): Promise<Project[]> {
     name: row.name,
     description: row.description ?? null,
     userId: row.user_id,
+    sandboxId: row.sandbox_id ?? null,
+    sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,
     status: row.status as any,
@@ -258,8 +278,184 @@ export async function listProjects(userId: string): Promise<Project[]> {
     lastError: row.last_error ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    lastAccessedAt: row.last_accessed_at ?? null,
+    isHibernated: row.is_hibernated ?? false,
+    bootupType: row.bootup_type as "CLEAN" | "RESUME" | "RUNNING" | "FORK" | null,
+    isUpToDate: row.is_up_to_date ?? null,
   }));
 }
+
+export interface SandboxQueueJob {
+  id: string;
+  userId: string;
+  projectId: string;
+  action: "create" | "resume";
+  payload: Record<string, unknown>;
+  status: "queued" | "processing" | "completed" | "failed";
+  position: number | null;
+  attempts: number;
+  error: string | null;
+  createdAt: string;
+}
+
+export async function countActiveSandboxes(userId?: string): Promise<number> {
+  const res = await query<{ count: string }>(
+    `SELECT COUNT(*)::int AS count
+     FROM projects
+     WHERE sandbox_id IS NOT NULL
+       AND is_hibernated = false
+       AND status IN ('ready', 'provisioning')` + (userId ? ` AND user_id = $1` : ""),
+    userId ? [userId] : []
+  );
+  return Number(res.rows[0]?.count ?? 0);
+}
+
+export async function enqueueSandboxJob(
+  userId: string,
+  projectId: string,
+  action: "create" | "resume",
+  payload: Record<string, unknown> = {}
+): Promise<SandboxQueueJob> {
+  const res = await query<{
+    id: string;
+    user_id: string;
+    project_id: string;
+    action: string;
+    payload: Record<string, unknown>;
+    status: string;
+    position: number | null;
+    attempts: number;
+    error: string | null;
+    created_at: string;
+  }>(
+    `WITH inserted AS (
+       INSERT INTO sandbox_queue (user_id, project_id, action, payload)
+       VALUES ($1, $2, $3, $4::jsonb)
+       RETURNING *
+     ),
+     positions AS (
+       SELECT id, COUNT(*) OVER (ORDER BY created_at, id)::bigint AS position
+       FROM sandbox_queue
+       WHERE status = 'queued'
+     )
+     SELECT i.*, p.position
+     FROM inserted i
+     LEFT JOIN positions p ON p.id = i.id`,
+    [userId, projectId, action, JSON.stringify(payload)]
+  );
+  const row = res.rows[0]!;
+  return {
+    id: row.id,
+    userId: row.user_id,
+    projectId: row.project_id,
+    action: row.action as "create" | "resume",
+    payload: row.payload,
+    status: row.status as SandboxQueueJob["status"],
+    position: row.position,
+    attempts: row.attempts,
+    error: row.error,
+    createdAt: row.created_at,
+  };
+}
+
+export async function claimNextSandboxJob(): Promise<SandboxQueueJob | null> {
+  const res = await query<{
+    id: string;
+    user_id: string;
+    project_id: string;
+    action: string;
+    payload: Record<string, unknown>;
+    status: string;
+    position: number | null;
+    attempts: number;
+    error: string | null;
+    created_at: string;
+  }>(
+    `WITH next_job AS (
+       SELECT id
+       FROM sandbox_queue
+       WHERE status = 'queued'
+       ORDER BY created_at, id
+       FOR UPDATE SKIP LOCKED
+       LIMIT 1
+     ),
+     claimed AS (
+       UPDATE sandbox_queue
+       SET status = 'processing',
+           claimed_at = now(),
+           attempts = attempts + 1,
+           error = NULL,
+           updated_at = now()
+       WHERE id = (SELECT id FROM next_job)
+       RETURNING *
+     )
+     SELECT * FROM claimed`,
+    []
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    userId: row.user_id,
+    projectId: row.project_id,
+    action: row.action as "create" | "resume",
+    payload: row.payload,
+    status: row.status as SandboxQueueJob["status"],
+    position: row.position,
+    attempts: row.attempts,
+    error: row.error,
+    createdAt: row.created_at,
+  };
+}
+
+export async function completeSandboxJob(jobId: string): Promise<void> {
+  await query(
+    `UPDATE sandbox_queue
+     SET status = 'completed', completed_at = now(), updated_at = now()
+     WHERE id = $1`,
+    [jobId]
+  );
+}
+
+export async function failSandboxJob(jobId: string, error: string): Promise<void> {
+  await query(
+    `UPDATE sandbox_queue
+     SET status = 'failed', error = $2, updated_at = now()
+     WHERE id = $1`,
+    [jobId, error]
+  );
+}
+
+/**
+ * Requeue sandbox_queue jobs stuck in 'processing' (worker died mid-job, e.g. Render restart).
+ * Returns how many jobs were requeued.
+ */
+export async function requeueStaleSandboxJobs(staleMinutes = 5): Promise<number> {
+  const res = await query<{ count: string }>(
+    `WITH requeued AS (
+       UPDATE sandbox_queue
+       SET status = 'queued', claimed_at = NULL, updated_at = now()
+       WHERE status = 'processing' AND claimed_at < now() - ($1 || ' minutes')::interval
+       RETURNING 1
+     )
+     SELECT COUNT(*)::int AS count FROM requeued`,
+    [String(staleMinutes)]
+  );
+  return Number(res.rows[0]?.count ?? 0);
+}
+
+export async function updateProjectRuntimeState(
+  projectId: string,
+  updates: {
+    isHibernated?: boolean;
+    bootupType?: Project["bootupType"];
+    isUpToDate?: boolean | null;
+    lastAccessedAt?: string | null;
+  }
+): Promise<void> {
+  await updateProject(projectId, updates);
+}
+
 
 export async function updateProject(
   id: string,
@@ -273,8 +469,14 @@ export async function updateProject(
     previewUrl?: string | null;
     devServerRunning?: boolean;
     lastError?: string | null;
+    sandboxId?: string | null;
+    sandboxSlug?: string | null;
     vmId?: string | null;
     vmSlug?: string | null;
+    lastAccessedAt?: string | null;
+    isHibernated?: boolean;
+    bootupType?: Project["bootupType"];
+    isUpToDate?: boolean | null;
   }
 ): Promise<Project | null> {
   const set: string[] = [];
@@ -292,12 +494,18 @@ export async function updateProject(
   if (updates.previewUrl !== undefined) add("preview_url", updates.previewUrl);
   if (updates.devServerRunning !== undefined) add("dev_server_running", updates.devServerRunning);
   if (updates.lastError !== undefined) add("last_error", updates.lastError);
+  if (updates.sandboxId !== undefined) add("sandbox_id", updates.sandboxId);
+  if (updates.sandboxSlug !== undefined) add("sandbox_slug", updates.sandboxSlug);
   if (updates.vmId !== undefined) add("vm_id", updates.vmId);
   if (updates.vmSlug !== undefined) add("vm_slug", updates.vmSlug);
+  if (updates.lastAccessedAt !== undefined) add("last_accessed_at", updates.lastAccessedAt);
+  if (updates.isHibernated !== undefined) add("is_hibernated", updates.isHibernated);
+  if (updates.bootupType !== undefined) add("bootup_type", updates.bootupType);
+  if (updates.isUpToDate !== undefined) add("is_up_to_date", updates.isUpToDate);
   if (set.length === 0) return null;
   vals.push(id);
   const res = await query(
-    `UPDATE projects SET ${set.join(", ")} WHERE id = $${vals.length} RETURNING id, slug, name, description, user_id, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at`,
+    `UPDATE projects SET ${set.join(", ")} WHERE id = $${vals.length} RETURNING id, slug, name, description, user_id, sandbox_id, sandbox_slug, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at, last_accessed_at, is_hibernated, bootup_type, is_up_to_date`,
     vals
   );
   if (!res.rows[0]) return null;
@@ -308,6 +516,8 @@ export async function updateProject(
     name: row.name,
     description: row.description ?? null,
     userId: row.user_id,
+    sandboxId: row.sandbox_id ?? null,
+    sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,
     status: row.status as any,
@@ -318,6 +528,10 @@ export async function updateProject(
     lastError: row.last_error ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    lastAccessedAt: row.last_accessed_at ?? null,
+    isHibernated: row.is_hibernated ?? false,
+    bootupType: row.bootup_type as Project["bootupType"],
+    isUpToDate: row.is_up_to_date ?? null,
   };
 }
 
@@ -383,7 +597,7 @@ export async function addMessage(
     toolResults,
     usage,
   }: {
-    role: string; // MessageRole allowed as string for flexibility
+    role: string;
     content: string | null;
     toolCalls?: any[];
     toolResults?: any[];
@@ -393,7 +607,7 @@ export async function addMessage(
   const res = await query<{
     id: string;
     conversation_id: string;
-    role: string; // MessageRole allowed as string for flexibility
+    role: string;
     content: string | null;
     tool_calls: any;
     tool_results: any;
@@ -435,7 +649,7 @@ export async function listMessages(conversationId: string): Promise<ChatMessage[
   const res = await query<{
     id: string;
     conversation_id: string;
-    role: string; // MessageRole allowed as string for flexibility
+    role: string;
     content: string | null;
     tool_calls: any;
     tool_results: any;

@@ -101,11 +101,11 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
     setTimeout(() => setVisible(true), 10);
   }, []);
 
-  const colors = {
-    success: "bg-emerald-600 border-emerald-500",
-    error: "bg-red-600 border-red-500",
-    warning: "bg-amber-600 border-amber-500",
-    info: "bg-accent-primary border-accent-primary",
+  const colors: Record<Toast["type"], React.CSSProperties> = {
+    success: { background: "var(--success)", borderColor: "color-mix(in srgb, var(--success) 70%, transparent)" },
+    error: { background: "var(--danger)", borderColor: "color-mix(in srgb, var(--danger) 70%, transparent)" },
+    warning: { background: "var(--warning)", borderColor: "color-mix(in srgb, var(--warning) 70%, transparent)" },
+    info: { background: "var(--accent-primary)", borderColor: "var(--accent-primary)" },
   };
 
   const icons = {
@@ -133,16 +133,17 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
 
   return (
     <div
-      className={`flex items-center gap-3 px-4 py-3 rounded-lg border shadow-lg transition-all duration-300 ${colors[toast.type]} ${
+      className={`flex items-center gap-3 px-4 py-3 rounded-lg border shadow-lg transition-all duration-300 ${
         visible ? "opacity-100 translate-x-0" : "opacity-0 translate-x-full"
       } ${mounted ? "" : "translate-x-full"}`}
+      style={colors[toast.type]}
     >
       {icons[toast.type]}
        <span className="text-primary text-sm">{toast.message}</span>
       <button
         onClick={onDismiss}
-        className="ml-2 hover:opacity-75"
-        aria-label="Dismiss"
+        className="ml-2 w-11 h-11 -my-3 flex items-center justify-center hover:opacity-75"
+        aria-label="Dismiss notification"
       >
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />

@@ -26,7 +26,7 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (isAuthenticated()) {
-      router.push("/");
+      router.push("/app/projects");
     }
   }, [router]);
 
@@ -64,12 +64,12 @@ export default function LoginPage() {
     if (/[a-z]/.test(password) && /[A-Z]/.test(password)) score++;
     if (/[0-9]/.test(password)) score++;
     if (/[^a-zA-Z0-9]/.test(password)) score++;
-    const strengths = [
-      { label: "Very Weak", color: "bg-red-500" },
-      { label: "Weak", color: "bg-orange-500" },
-      { label: "Fair", color: "bg-yellow-500" },
-      { label: "Good", color: "bg-lime-500" },
-      { label: "Strong", color: "bg-green-500" },
+    const strengths: { label: string; color: string }[] = [
+      { label: "Very Weak", color: "var(--danger)" },
+      { label: "Weak", color: "color-mix(in srgb, var(--danger) 70%, var(--warning))" },
+      { label: "Fair", color: "var(--warning)" },
+      { label: "Good", color: "color-mix(in srgb, var(--warning) 60%, var(--success))" },
+      { label: "Strong", color: "var(--success)" },
     ];
     const idx = Math.min(score, 4); return { score, label: (strengths[idx]! as any).label, color: (strengths[idx]! as any).color };
   };
@@ -121,7 +121,7 @@ export default function LoginPage() {
         throw new Error("Authentication failed: no token returned");
       }
       setAuthState(data.token, data.email, data.userId);
-      router.push("/");
+      router.push("/app/projects");
     } catch (err: any) {
       // fetch() throws a TypeError ("Failed to fetch") when the request never
       // reaches the API: network error, DNS failure, or a CORS rejection.
@@ -194,7 +194,15 @@ export default function LoginPage() {
 
         <form onSubmit={handleSubmit} className="bg-secondary rounded-2xl p-8 border shadow-soft">
           {error && (
-            <div className="mb-6 p-3 bg-red-500/10 border border-red-500/50 rounded-lg text-red-400 text-sm" role="alert">
+            <div
+              className="mb-6 p-3 rounded-lg text-sm"
+              role="alert"
+              style={{
+                background: "color-mix(in srgb, var(--danger) 10%, transparent)",
+                border: "1px solid color-mix(in srgb, var(--danger) 50%, transparent)",
+                color: "var(--danger)",
+              }}
+            >
               {error}
             </div>
           )}
@@ -210,9 +218,9 @@ export default function LoginPage() {
                 placeholder="John Doe"
                 aria-invalid={nameError ? "true" : undefined}
                 aria-describedby={nameError ? "name-error" : undefined}
-                className={`w-full px-4 py-3 bg-primary/50 border rounded-lg text-primary placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-accent-primary focus-visible:ring-2 focus-visible:ring-accent-primary transition-colors ${nameError ? "border-red-500" : "border-tertiary"}`}
+                className={`w-full px-4 py-3 bg-primary/50 border rounded-lg text-primary placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-accent-primary focus-visible:ring-2 focus-visible:ring-accent-primary transition-colors ${nameError ? "border-[color:var(--danger)]" : "border-tertiary"}`}
               />
-              {nameError && <p id="name-error" role="alert" className="text-red-400 text-sm mt-1">{nameError}</p>}
+              {nameError && <p id="name-error" role="alert" className="text-sm mt-1" style={{ color: "var(--danger)" }}>{nameError}</p>}
             </div>
           )}
 
@@ -226,9 +234,9 @@ export default function LoginPage() {
               placeholder="you@example.com"
               aria-invalid={emailError ? "true" : undefined}
               aria-describedby={emailError ? "email-error" : undefined}
-               className={`w-full px-4 py-3 bg-primary/50 border rounded-lg text-primary placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-accent-primary focus-visible:ring-2 focus-visible:ring-accent-primary transition-colors ${emailError ? "border-red-500" : "border-tertiary"}`}
+               className={`w-full px-4 py-3 bg-primary/50 border rounded-lg text-primary placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-accent-primary focus-visible:ring-2 focus-visible:ring-accent-primary transition-colors ${emailError ? "border-[color:var(--danger)]" : "border-tertiary"}`}
             />
-            {emailError && <p id="email-error" role="alert" className="text-red-400 text-sm mt-1">{emailError}</p>}
+            {emailError && <p id="email-error" role="alert" className="text-sm mt-1" style={{ color: "var(--danger)" }}>{emailError}</p>}
           </div>
 
           <div className="mb-5">
@@ -242,7 +250,7 @@ export default function LoginPage() {
                 placeholder="••••••••"
                 aria-invalid={passwordError ? "true" : undefined}
                 aria-describedby={passwordError ? "password-error" : undefined}
-                className={`w-full px-4 py-3 bg-primary/50 border rounded-lg text-primary placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-accent-primary focus-visible:ring-2 focus-visible:ring-accent-primary transition-colors pr-12 ${passwordError ? "border-red-500" : "border-tertiary"}`}
+                className={`w-full px-4 py-3 bg-primary/50 border rounded-lg text-primary placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-accent-primary focus-visible:ring-2 focus-visible:ring-accent-primary transition-colors pr-12 ${passwordError ? "border-[color:var(--danger)]" : "border-tertiary"}`}
               />
               <button
                 type="button"
@@ -256,13 +264,16 @@ export default function LoginPage() {
               <div className="mt-2" role="progressbar" aria-valuenow={passwordStrength.score} aria-valuemin={0} aria-valuemax={4}>
                 <div className="flex gap-1 h-1">
                   {[0, 1, 2, 3, 4].map((i) => (
-                     <div key={i} className={`flex-1 rounded ${i < passwordStrength.score ? passwordStrength.color : "bg-tertiary"}`} />
+                     <div
+                       key={i}
+                       className="flex-1 rounded"
+                       style={i < passwordStrength.score ? { background: passwordStrength.color } : { background: "var(--bg-tertiary)" }}
+                     />
                   ))}
                 </div>
                  <p className="text-xs text-muted mt-1">{passwordStrength.label}</p>
               </div>
-            )}
-            {passwordError && <p id="password-error" role="alert" className="text-red-400 text-sm mt-1">{passwordError}</p>}
+            )}              {passwordError && <p id="password-error" role="alert" className="text-sm mt-1" style={{ color: "var(--danger)" }}>{passwordError}</p>}
           </div>
 
           {isRegister && (
@@ -277,7 +288,7 @@ export default function LoginPage() {
                   placeholder="••••••••"
                   aria-invalid={confirmError ? "true" : undefined}
                   aria-describedby={confirmError ? "confirm-password-error" : undefined}
-                   className={`w-full px-4 py-3 bg-primary/50 border rounded-lg text-primary placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-accent-primary focus-visible:ring-2 focus-visible:ring-accent-primary transition-colors pr-12 ${confirmError ? "border-red-500" : "border-tertiary"}`}
+                   className={`w-full px-4 py-3 bg-primary/50 border rounded-lg text-primary placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-accent-primary focus-visible:ring-2 focus-visible:ring-accent-primary transition-colors pr-12 ${confirmError ? "border-[color:var(--danger)]" : "border-tertiary"}`}
                 />
                 <button
                   type="button"
@@ -287,7 +298,7 @@ export default function LoginPage() {
                   {showConfirmPassword ? "Hide" : "Show"}
                 </button>
               </div>
-              {confirmError && <p id="confirm-password-error" role="alert" className="text-red-400 text-sm mt-1">{confirmError}</p>}
+              {confirmError && <p id="confirm-password-error" role="alert" className="text-sm mt-1" style={{ color: "var(--danger)" }}>{confirmError}</p>}
             </div>
           )}
 

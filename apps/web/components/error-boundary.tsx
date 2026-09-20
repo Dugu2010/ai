@@ -22,8 +22,11 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBound
       return (
         <div className="min-h-screen bg-primary text-primary flex items-center justify-center p-4">
           <div className="max-w-md w-full text-center card">
-            <div className="w-14 h-14 mx-auto mb-4 rounded-full bg-red-500/10 flex items-center justify-center">
-              <svg className="w-7 h-7 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div
+              className="w-14 h-14 mx-auto mb-4 rounded-full flex items-center justify-center"
+              style={{ background: "color-mix(in srgb, var(--danger) 10%, transparent)" }}
+            >
+              <svg className="w-7 h-7" style={{ color: "var(--danger)" }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M12 3l9.5 16.5H2.5L12 3z" />
               </svg>
             </div>

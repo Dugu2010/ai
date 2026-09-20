@@ -11,6 +11,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@dai/codesandbox": "workspace:*",
     "@dai/db": "workspace:*",
     "@dai/freestyle": "workspace:*",
     "@dai/nim": "workspace:*",

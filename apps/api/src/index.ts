@@ -2,6 +2,7 @@ import "dotenv/config";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import { ensureSchema } from "./lib/schema.js";
+import { CODESANDBOX_API_KEY } from "./lib/env.js";
 import authRoutes from "./routes/auth.js";
 import projectRoutes from "./routes/projects.js";
 import agentRoutes from "./routes/agent.js";
@@ -124,8 +125,35 @@ async function connectWithRetries(maxRetries = 10): Promise<void> {
   process.exit(1);
 }
 
+// ---------- Sandbox queue worker (Item 5) ----------
+// Handlers run queued create/resume jobs when a concurrency slot frees up.
+// Queue state lives in PostgreSQL (sandbox_queue), so this survives Render restarts.
+async function startQueueWorker(): Promise<void> {
+  const { registerSandboxJobHandler, startSandboxQueueWorker } = await import("./lib/sandbox-queue.js");
+  const { getProject } = await import("@dai/db");
+
+  registerSandboxJobHandler("create", async (job) => {
+    const project = await getProject(job.projectId);
+    if (!project) return; // project deleted while queued — completing the job is correct
+    const { provisionSandbox } = await import("./routes/projects.js");
+    await provisionSandbox(project);
+  });
+
+  registerSandboxJobHandler("resume", async (job) => {
+    const project = await getProject(job.projectId);
+    if (!project || !project.sandboxId) return;
+    const { CodeSandboxClient } = await import("@dai/codesandbox");
+    const client = new CodeSandboxClient(CODESANDBOX_API_KEY());
+    await client.resumeSandbox(project.sandboxId);
+  });
+
+  await startSandboxQueueWorker();
+  console.log("[sandbox-queue] worker started");
+}
+
 connectWithRetries()
   .then(() => ensureSchema())
+  .then(() => startQueueWorker())
   .catch((err) => {
     console.error("Fatal DB init error:", err);
     process.exit(1);

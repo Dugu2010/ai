@@ -1,371 +1,285 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useRouter, usePathname } from "next/navigation";
-import { isAuthenticated, fetchApi, logout } from "../lib/api-client";
-import { PageSkeleton, ProjectSkeleton } from "../components/loading-skeleton";
+import { useState, useEffect, useCallback } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { isAuthenticated } from "../lib/api-client";
+import { ThemeToggle } from "../components/theme-toggle";
 
-interface Project {
-  id: string;
-  name: string;
-  slug: string;
-  status: string;
-  previewUrl?: string | null;
-  createdAt?: string;
-  updatedAt?: string;
-}
+const FEATURES = [
+  {
+    title: "Real Linux VM",
+    body: "Full Node, Python, Git and a real shell in a CodeSandbox VM — not an emulation layer.",
+  },
+  {
+    title: "Live Preview",
+    body: "Your dev server on a real HTTPS URL. DAI resumes it automatically when the VM wakes up.",
+  },
+  {
+    title: "AI Agent Loop",
+    body: "DAI inspects files, edits code, runs commands, reads the output, then fixes what breaks.",
+  },
+  {
+    title: "Persistent State",
+    body: "Files and processes survive sessions. The VM hibernates when idle and picks up where it left off.",
+  },
+];
 
-export default function HomePage() {
+export default function LandingPage() {
   const router = useRouter();
-  const pathname = usePathname();
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [authLoading, setAuthLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
-  const [error, setError] = useState("");
-  const [showModal, setShowModal] = useState(false);
-  const [newSlug, setNewSlug] = useState("");
-  const [newName, setNewName] = useState("");
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [authed, setAuthed] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
+  // Mobile hamburger menu (below md — responsive 2F)
+  const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
-    if (!isAuthenticated() && pathname !== "/auth/login") {
-      router.replace("/auth/login");
-    } else {
-      setAuthLoading(false);
-    }
-  }, [router, pathname]);
-
-  const fetchProjects = async () => {
-    setError("");
-    try {
-      const res = await fetchApi("/api/projects");
-      if (res.ok) {
-        const data = await res.json();
-        setProjects(Array.isArray(data) ? data : []);
-      } else {
-        const err = await res.json();
-        setError(err.error || "Failed to fetch projects");
-      }
-    } catch {
-      setError("Failed to fetch projects");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchProjects();
+    setAuthed(isAuthenticated());
+    setReady(true);
   }, []);
 
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newSlug || !newName) return;
-    setCreating(true);
-    setError("");
-    try {
-      const res = await fetchApi("/api/projects", {
-        method: "POST",
-        body: JSON.stringify({ slug: newSlug, name: newName }),
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Failed to create project");
-      }
-      await fetchProjects();
-      setNewSlug("");
-      setNewName("");
-      setShowModal(false);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setCreating(false);
-    }
-  };
+  // Signed-in visitors land on the dashboard, not the marketing page.
+  useEffect(() => {
+    if (ready && authed) router.replace("/app");
+  }, [ready, authed, router]);
 
-  const handleDelete = async (id: string) => {
-    if (!confirm("Delete this project and its VM?")) return;
-    setError("");
+  const copy = useCallback(async (text: string, key: string) => {
     try {
-      const res = await fetchApi(`/api/projects/${id}`, { method: "DELETE" });
-      if (res.ok) {
-        await fetchProjects();
-      } else {
-        const err = await res.json();
-        setError(err.error || "Failed to delete project");
-      }
-    } catch (err: any) {
-      setError(err.message);
-    }
-  };
-
-  const handleLogout = async () => {
-    try {
-      await logout();
-      router.push("/auth/login");
+      await navigator.clipboard.writeText(text);
+      setCopied(key);
+      setTimeout(() => setCopied(null), 2000);
     } catch {
-      router.push("/auth/login");
+      // Clipboard unavailable (e.g. insecure context) — leave the command visible.
     }
-  };
+  }, []);
 
-  const formatDate = (dateStr?: string) => {
-    if (!dateStr) return "Never";
-    const date = new Date(dateStr);
-    return date.toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  };
+  const installTabs = [
+    { id: "bun", label: "bun", command: "bun create dai-app" },
+    { id: "npm", label: "npm", command: "npm create dai-app@latest" },
+    { id: "pnpm", label: "pnpm", command: "pnpm create dai-app" },
+  ] as const;
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case "ready":
-        return "bg-green-500";
-      case "creating":
-        return "bg-yellow-500";
-      case "error":
-        return "bg-red-500";
-      default:
-        return "bg-gray-500";
-    }
-  };
-
-  if (authLoading) {
-    return <PageSkeleton />;
-  }
+  const [activeTab, setActiveTab] = useState<(typeof installTabs)[number]["id"]>("bun");
+  const activeInstall = installTabs.find((t) => t.id === activeTab)!;
 
   return (
-    <div className="min-h-screen bg-primary text-primary">
-      <header className="border-b border-border bg-primary/80 backdrop-blur sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 md:px-6 py-4">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 bg-accent-primary rounded-lg flex items-center justify-center">
-                  <span className="font-bold text-white">D</span>
-                </div>
-                <h1 className="text-2xl font-bold">DAI</h1>
-              </div>
-              <nav className="hidden md:flex gap-4">
-                <a href="/" className="text-accent-primary font-medium">Dashboard</a>
-                <a href="/settings" className="text-secondary hover:text-primary">Settings</a>
-              </nav>
-            </div>
-             <div className="flex items-center gap-4">
-                <div className="hidden md:flex items-center gap-2 text-secondary">
-                  <span className="text-sm">Projects:</span>
-                  <span className="text-accent-primary font-semibold">{projects.length}</span>
-                </div>
-                <button
-                  onClick={() => setShowModal(true)}
-                  className="hidden md:block px-4 py-2 bg-accent-primary rounded-lg hover:bg-accent-hover text-sm font-medium"
-                >
-                  New Project
-                </button>
-                <button
-                  onClick={handleLogout}
-                  className="text-secondary hover:text-primary text-sm font-medium"
-                >
-                  Logout
-                </button>
-                <button
-                  onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-                  className="md:hidden text-secondary"
-                  aria-label="Toggle menu"
-                >
-                  ☰
-                </button>
-              </div>
-          </div>
-           {mobileMenuOpen && (
-             <div className="md:hidden mt-4 flex flex-col gap-2">
-               <a href="/" className="px-4 py-2 bg-secondary rounded text-accent-primary font-medium">Dashboard</a>
-               <a href="/settings" className="px-4 py-2 bg-secondary rounded">Settings</a>
-               <button
-                 onClick={() => { setShowModal(true); setMobileMenuOpen(false); }}
-                 className="px-4 py-2 bg-accent-primary rounded text-left text-white font-medium"
-               >
-                 New Project
-               </button>
-             </div>
-           )}
-         </div>
-       </header>
-
-        <main className="max-w-7xl mx-auto px-4 md:px-6 py-8">
-        <div className="mb-8 flex justify-between items-center">
-          <div>
-            <h2 className="text-3xl font-bold mb-2">Projects</h2>              <p className="text-secondary">Manage your DAI projects</p>
-          </div>
-          <button
-            onClick={() => setShowModal(true)}
-            className="md:hidden px-4 py-2 bg-accent-primary rounded-lg text-white text-sm font-medium"
-          >
-            + New
-          </button>
-        </div>
-
-        {loading ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            <ProjectSkeleton />
-            <ProjectSkeleton />
-            <ProjectSkeleton />
-            <ProjectSkeleton />
-            <ProjectSkeleton />
-            <ProjectSkeleton />
-          </div>
-        ) : projects.length === 0 ? (
-          <div className="text-center py-16 bg-secondary/50 rounded-lg border border-border">
-            <div className="w-16 h-16 bg-tertiary rounded-full flex items-center justify-center mx-auto mb-4">
-              <span className="text-2xl">📁</span>
-            </div>
-            <h3 className="text-xl font-semibold mb-2">No projects yet</h3>
-            <p className="text-secondary mb-6 max-w-md mx-auto">Create your first project to get started</p>
-            <button
-              onClick={() => setShowModal(true)}
-              className="px-6 py-3 bg-accent-primary text-white rounded-lg hover:bg-accent-hover font-medium transition-all hover:shadow-md"
+    <div className="min-h-screen bg-primary text-primary flex flex-col">
+      {/* 1. Header bar — sticky, 64px, hairline bottom border (Linear nav pattern) */}
+      <header className="glass sticky top-0 z-50 border-b" style={{ height: "var(--header-h)" }}>
+        <div className="max-w-6xl mx-auto px-4 md:px-6 h-full flex items-center justify-between">
+          <Link href="/" className="flex items-center gap-2" aria-label="DAI home">
+            <div
+              className="w-8 h-8 rounded-md flex items-center justify-center text-white"
+              style={{ background: "var(--accent-primary)" }}
             >
-              Create Your First Project
+              <span className="font-semibold text-sm">D</span>
+            </div>
+            <span className="text-lg" style={{ fontWeight: 590 }}>DAI</span>
+          </Link>
+          <nav className="hidden md:flex items-center gap-6 text-sm" style={{ fontWeight: 510, color: "var(--text-muted)" }} aria-label="Primary">
+            <a href="#features" className="hover:text-primary transition-colors">Features</a>
+            <a href="#example" className="hover:text-primary transition-colors">Example</a>
+            <a href="https://github.com" target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors">
+              GitHub
+            </a>
+            <a href="#footer" className="hover:text-primary transition-colors">Pricing</a>
+            <Link href="/app" className="hover:text-primary transition-colors">Dashboard</Link>
+          </nav>
+          <div className="flex items-center gap-3">
+            <ThemeToggle />
+            <Link href={ready && authed ? "/app" : "/auth/login"} className="btn btn-primary hidden sm:inline-flex">
+              Get Started
+            </Link>
+            {/* Nav collapses to hamburger below md (responsive 2F) */}
+            <button
+              onClick={() => setMenuOpen((prev) => !prev)}
+              aria-label={menuOpen ? "Close navigation menu" : "Open navigation menu"}
+              aria-expanded={menuOpen}
+              aria-controls="mobile-nav"
+              className="md:hidden w-11 h-11 flex items-center justify-center rounded hover:bg-secondary"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                {menuOpen
+                  ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />}
+              </svg>
             </button>
           </div>
-        ) : (
-           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-             {projects.map((p) => (
-               <div
-                 key={p.id}
-                 className="p-6 bg-secondary rounded-lg border border-border hover:border-accent-primary transition-all hover:shadow-lg flex flex-col"
-               >
-                 <div className="flex items-start justify-between mb-4">
-                   <div className="flex items-center gap-2">
-                     <div className={`w-2 h-2 rounded-full ${getStatusColor(p.status)}`} aria-label={`Status: ${p.status}`} />
-                     <span className={`text-xs font-medium px-2 py-0.5 rounded-full capitalize ${
-                       p.status === 'ready' ? 'bg-green-500/10 text-green-500' :
-                       p.status === 'creating' ? 'bg-yellow-500/10 text-yellow-500' :
-                       p.status === 'error' ? 'bg-red-500/10 text-red-500' :
-                       'bg-gray-500/10 text-gray-500'
-                     }`}>{p.status}</span>
-                   </div>
-                     <div className="text-xs text-muted">
-                     {formatDate(p.updatedAt || p.createdAt)}
-                   </div>
-                 </div>
-                 <h3 className="font-semibold text-lg mb-1">{p.name}</h3>
-                  <p className="text-sm text-muted mb-4 font-mono">{p.slug}</p>
-                 {p.previewUrl && (
-                   <a
-                     href={p.previewUrl}
-                     target="_blank"
-                     rel="noopener noreferrer"
-                     className="text-sm text-accent-primary hover:underline mb-4 inline-block"
-                   >
-                     Preview →
-                   </a>
-                 )}
-                 <div className="mt-auto flex gap-2">
-                   <button
-                     onClick={() => router.push(`/projects/${p.id}`)}
-                     title="Open project"
-                     className="flex-1 px-3 py-2 bg-accent-primary text-white rounded-lg hover:bg-accent-hover text-sm font-medium transition-all"
-                   >
-                     Open
-                   </button>
-                   <button
-                     onClick={() => handleDelete(p.id)}
-                     title="Delete project"
-                     className="px-3 py-2 bg-red-600/10 text-red-500 rounded-lg hover:bg-red-600/20 text-sm font-medium transition-all"
-                   >
-                     Delete
-                   </button>
-                 </div>
-               </div>
-             ))}
-           </div>
+        </div>
+        {menuOpen && (
+          <nav id="mobile-nav" aria-label="Mobile" className="md:hidden border-t" style={{ borderColor: "var(--border-color)" }}>
+            <div className="max-w-6xl mx-auto px-4 py-3 flex flex-col">
+              <a href="#features" onClick={() => setMenuOpen(false)} className="py-3 text-sm hover:text-primary transition-colors" style={{ color: "var(--text-secondary)" }}>Features</a>
+              <a href="#example" onClick={() => setMenuOpen(false)} className="py-3 text-sm hover:text-primary transition-colors" style={{ color: "var(--text-secondary)" }}>Example</a>
+              <a href="https://github.com" target="_blank" rel="noopener noreferrer" className="py-3 text-sm hover:text-primary transition-colors" style={{ color: "var(--text-secondary)" }}>GitHub</a>
+              <a href="#footer" onClick={() => setMenuOpen(false)} className="py-3 text-sm hover:text-primary transition-colors" style={{ color: "var(--text-secondary)" }}>Pricing</a>
+              <Link href="/app" onClick={() => setMenuOpen(false)} className="py-3 text-sm hover:text-primary transition-colors" style={{ color: "var(--text-secondary)" }}>Dashboard</Link>
+            </div>
+          </nav>
         )}
+      </header>
 
-          {error && (
-            <div className="mt-6 p-4 bg-red-600/10 border border-red-600/30 rounded-lg flex items-center justify-between">
-              <span className="text-red-500">{error}</span>
-              <button
-                onClick={fetchProjects}
-                className="px-4 py-2 bg-red-600/10 text-red-500 rounded-lg hover:bg-red-600/20 text-sm font-medium transition-all"
+      <main id="main-content" className="flex-1">
+        {/* 2. Hero — concrete headline, mesh gradient at hero scale only (Vercel pattern) */}
+        <section className="hero-mesh">
+          <div className="max-w-6xl mx-auto px-4 md:px-6 pt-24 pb-16 md:pt-32 md:pb-24 text-center animate-fade-in-up">
+            <p
+              className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs mb-8"
+              style={{ borderColor: "var(--border-color)", color: "var(--text-muted)" }}
+            >
+              <span
+                className="w-2 h-2 rounded-full animate-pulse-slow"
+                style={{ background: "var(--accent-primary)" }}
+              />
+              Browser-based coding agent
+            </p>
+            <h1
+              className="text-4xl md:text-6xl leading-[1.05]"
+              style={{ fontWeight: 510, letterSpacing: "-0.045em" }}
+            >
+              Your AI coding agent.
+              <br />
+              Browser-based, no terminal required.
+            </h1>
+            <p
+              className="mt-6 max-w-2xl mx-auto text-base md:text-lg"
+              style={{ color: "var(--text-secondary)" }}
+            >
+              DAI works inside a real Linux VM: it reads your code, edits files, runs
+              commands and starts dev servers — you stay in the browser the whole time.
+            </p>
+            <div className="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4">
+              <Link href={ready && authed ? "/app" : "/auth/login"} className="btn btn-primary w-full sm:w-auto px-6">
+                Get Started
+              </Link>
+              <a
+                href="https://github.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn btn-secondary w-full sm:w-auto px-6"
               >
-                Retry
+                View on GitHub
+              </a>
+            </div>
+          </div>
+        </section>
+
+        {/* 3. Install command — copy-to-clipboard, tabbed (Vercel component pattern) */}
+        <section className="max-w-6xl mx-auto px-4 md:px-6 pb-8">
+          <div className="max-w-xl mx-auto">
+            <div className="flex items-center gap-1 mb-2" role="tablist" aria-label="Package manager">
+              {installTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  role="tab"
+                  aria-selected={activeTab === tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className="btn btn-ghost px-3 min-h-[44px] text-xs"
+                  style={activeTab === tab.id ? { color: "var(--text-primary)" } : undefined}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+            <div
+              className="flex items-center justify-between rounded-lg px-4"
+              style={{
+                background: "color-mix(in srgb, var(--text-primary) 4%, transparent)",
+                boxShadow: "var(--shadow-ring)",
+                height: "var(--touch-target)",
+              }}
+            >
+              <code className="font-mono text-sm" style={{ color: "var(--text-secondary)" }}>
+                <span style={{ color: "var(--accent-primary)", marginRight: 8 }}>$</span>
+                {activeInstall.command}
+              </code>
+              <button
+                onClick={() => copy(activeInstall.command, activeTab)}
+                className="btn btn-ghost px-3 min-h-[44px] text-xs"
+                aria-label={`Copy ${activeInstall.command}`}
+              >
+                {copied === activeTab ? "Copied" : "Copy"}
               </button>
             </div>
-          )}
-       </main>
-
-      {showModal && (
-        <div
-          className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
-          onClick={() => setShowModal(false)}
-        >
-           <div
-             className="bg-secondary p-6 rounded-lg w-full max-w-md border border-[color:var(--border-color)]"
-             onClick={(e) => e.stopPropagation()}
-           >
-             <h2 className="text-xl font-bold mb-4">Create New Project</h2>
-             <form onSubmit={handleCreate}>
-               <div className="mb-4">
-                 <label className="block text-secondary text-sm font-medium mb-2">
-                   Slug
-                 </label>
-                 <input
-                   type="text"
-                   value={newSlug}
-                   onChange={(e) => setNewSlug(e.target.value)}
-                   placeholder="my-project"
-                   className="w-full px-4 py-2 bg-tertiary border border-[color:var(--border-color)] rounded-lg focus:outline-none focus:border-[color:var(--accent-primary)]"
-                  autoFocus
-                />
-              </div>
-               <div className="mb-6">
-                 <label className="block text-secondary text-sm font-medium mb-2">
-                   Name
-                 </label>
-                 <input
-                   type="text"
-                   value={newName}
-                   onChange={(e) => setNewName(e.target.value)}
-                   placeholder="My Project"
-                   className="w-full px-4 py-2 bg-tertiary border border-[color:var(--border-color)] rounded-lg focus:outline-none focus:border-[color:var(--accent-primary)]"
-                 />
-               </div>
-              <div className="flex gap-2">
-                <button
-                  type="submit"
-                  disabled={creating}
-                  className="flex-1 py-2 bg-accent-primary rounded-lg hover:bg-accent-hover disabled:opacity-50 font-medium"
-                >
-                  {creating ? "Creating..." : "Create"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowModal(false)}
-                   className="px-4 py-2 bg-tertiary rounded-lg hover:bg-secondary font-medium"
-                >
-                  Cancel
-                </button>
-              </div>
-            </form>
           </div>
-        </div>
-      )}
+        </section>
 
-       <button
-         onClick={() => setShowModal(true)}
-         className="fixed bottom-6 right-6 w-14 h-14 bg-accent-primary rounded-full flex items-center justify-center hover:bg-accent-hover focus:outline-none focus:ring-4 focus:ring-accent-primary/30 shadow-lg z-40 touch-manipulation transition-all"
-         aria-label="Create new project"
-         style={{
-           paddingBottom: 'env(safe-area-inset-bottom, 0)',
-           paddingRight: 'env(safe-area-inset-right, 0)',
-         }}
-       >
-         <span className="text-2xl font-bold">+</span>
-       </button>
-     </div>
+        {/* 4. Feature highlights — 4 cards, surface-color depth (Linear card pattern) */}
+        <section id="features" className="max-w-6xl mx-auto px-4 md:px-6 py-16 md:py-24">
+          <h2 className="text-2xl md:text-3xl mb-10" style={{ fontWeight: 510, letterSpacing: "-0.03em" }}>
+            What you get
+          </h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {FEATURES.map((f) => (
+              <div key={f.title} className="card">
+                <h3 className="text-base mb-2" style={{ fontWeight: 590 }}>{f.title}</h3>
+                <p className="text-sm leading-6" style={{ color: "var(--text-muted)" }}>{f.body}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* 5. Quick example — real code showing the agent at work */}
+        <section id="example" className="max-w-6xl mx-auto px-4 md:px-6 pb-16 md:pb-24">
+          <div className="grid lg:grid-cols-2 gap-8 items-center">
+            <div>
+              <h2 className="text-2xl md:text-3xl mb-4" style={{ fontWeight: 510, letterSpacing: "-0.03em" }}>
+                See it work
+              </h2>
+              <p className="text-base leading-6" style={{ color: "var(--text-secondary)" }}>
+                One prompt in chat. The agent inspects the failing test, edits the
+                function, re-runs the suite, and reports what changed — as an activity
+                timeline, not a wall of logs.
+              </p>
+            </div>
+            <div className="command-output expanded" style={{ padding: "var(--space-4)" }}>
+              <pre style={{ maxHeight: "none", overflow: "visible" }}>
+{`> you: fix the failing test in utils.test.ts
+
+  agent  read_file   src/utils.test.ts
+  agent  read_file   src/utils.ts
+  agent  edit_file   src/utils.ts  (+2 −1)
+  agent  run_tests   bun test
+
+  ✓ 14 passed (1.2s)
+
+> agent: parseDuration("90s") was returning NaN — the
+  seconds branch ran after the minutes branch. Reordered
+  the cases and re-ran the suite. All green.`}
+              </pre>
+            </div>
+          </div>
+        </section>
+
+        {/* 6. Social proof — omitted: no genuine stars/downloads/adopter data yet */}
+        {/* 7. Footer */}
+        <footer id="footer" className="border-t" style={{ borderColor: "var(--border-color)" }}>
+          <div className="max-w-6xl mx-auto px-4 md:px-6 py-12 flex flex-col md:flex-row justify-between gap-8">
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <div
+                  className="w-6 h-6 rounded-md flex items-center justify-center text-white text-xs"
+                  style={{ background: "var(--accent-primary)" }}
+                >
+                  D
+                </div>
+                <span style={{ fontWeight: 590 }}>DAI</span>
+              </div>
+              <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+                MIT License · v0.1.0
+              </p>
+            </div>
+            <nav className="flex flex-wrap gap-x-8 gap-y-2 text-sm" style={{ color: "var(--text-muted)" }}>
+              <a href="#features" className="hover:text-primary transition-colors">Docs</a>
+              <a href="https://github.com" target="_blank" rel="noopener noreferrer" className="hover:text-primary transition-colors">
+                GitHub
+              </a>
+              <a href="#footer" className="hover:text-primary transition-colors">Changelog</a>
+              <a href="#footer" className="hover:text-primary transition-colors">Status</a>
+            </nav>
+          </div>
+        </footer>
+      </main>
+    </div>
   );
 }

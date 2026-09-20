@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { isAuthenticated, logout, fetchApi } from "../../lib/api-client";
 import { getTheme, toggleTheme, type Theme } from "../../lib/theme";
+import { useFocusTrap } from "../../lib/use-focus-trap";
 
 function useDebounce<T>(value: T, delay: number): T {
   const [debouncedValue, setDebouncedValue] = useState(value);
@@ -22,6 +23,9 @@ export default function SettingsPage() {
   const [error, setError] = useState("");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [theme, setTheme] = useState<Theme>("dark");
+  // Focus trap for the mobile menu drawer: Escape closes, Tab cycles inside.
+  const menuRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(menuRef, mobileMenuOpen, () => setMobileMenuOpen(false));
 
   // Settings state
   const [email, setEmail] = useState("");
@@ -126,7 +130,7 @@ export default function SettingsPage() {
         <div className="max-w-4xl mx-auto px-4 py-4">
           <div className="flex justify-between items-center">
             <div className="flex items-center gap-4">
-              <button onClick={() => router.push("/")} className="btn-ghost" aria-label="Go back">
+              <button onClick={() => router.push("/app/projects")} className="btn-ghost" aria-label="Go back">
                 ←
               </button>
               <h1 className="text-2xl font-bold">Settings</h1>
@@ -223,7 +227,7 @@ export default function SettingsPage() {
           </div>
           <p className="text-muted text-sm mt-2">
             {isApiKeySet ? (
-              <span className="text-emerald-500">✓ API key is configured</span>
+              <span style={{ color: "var(--success)" }}>✓ API key is configured</span>
             ) : (
               "Paste your key and press Save"
             )}
@@ -239,17 +243,39 @@ export default function SettingsPage() {
         {/* Feedback */}
         <div aria-live="polite">
           {error && (
-            <div className="p-4 bg-red-500/10 border border-red-500/40 rounded-lg text-red-500 text-sm animate-fade-in">
+            <div
+              className="p-4 rounded-lg text-sm animate-fade-in border"
+              role="alert"
+              style={{
+                background: "color-mix(in srgb, var(--danger) 10%, transparent)",
+                borderColor: "color-mix(in srgb, var(--danger) 40%, transparent)",
+                color: "var(--danger)",
+              }}
+            >
               {error}
             </div>
           )}
           {success && !error && (
-            <div className="p-4 bg-emerald-500/10 border border-emerald-500/40 rounded-lg text-emerald-500 text-sm animate-fade-in">
+            <div
+              className="p-4 rounded-lg text-sm animate-fade-in border"
+              style={{
+                background: "color-mix(in srgb, var(--success) 10%, transparent)",
+                borderColor: "color-mix(in srgb, var(--success) 40%, transparent)",
+                color: "var(--success)",
+              }}
+            >
               ✓ {success}
             </div>
           )}
           {saving && !success && (
-            <div className="p-4 bg-amber-500/10 border border-amber-500/40 rounded-lg text-amber-600 dark:text-amber-400 text-sm animate-fade-in">
+            <div
+              className="p-4 rounded-lg text-sm animate-fade-in border"
+              style={{
+                background: "color-mix(in srgb, var(--warning) 10%, transparent)",
+                borderColor: "color-mix(in srgb, var(--warning) 40%, transparent)",
+                color: "var(--warning)",
+              }}
+            >
               Saving…
             </div>
           )}
@@ -257,8 +283,8 @@ export default function SettingsPage() {
 
         {mobileMenuOpen && (
           <div className="fixed inset-0 z-50 md:hidden" onClick={() => setMobileMenuOpen(false)}>
-            <div className="absolute inset-0 bg-black/50" />
-            <div className="absolute right-0 top-0 h-full w-64 bg-primary border-l p-4">
+            <div className="absolute inset-0" style={{ background: "rgba(0, 0, 0, 0.5)" }} aria-hidden="true" />
+            <div ref={menuRef} className="absolute right-0 top-0 h-full w-64 bg-primary border-l p-4">
               <button onClick={handleLogout} className="btn-danger w-full">Logout</button>
             </div>
           </div>

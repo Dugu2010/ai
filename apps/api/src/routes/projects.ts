@@ -1,51 +1,56 @@
 import { Router, Request, Response } from "express";
 import { listProjects, createProject, getProjectByUser, updateProject, deleteProject } from "@dai/db";
 import { requireAuth, getAuthUser } from "../lib/auth.js";
-import { FREESTYLE_API_KEY, IDLE_TIMEOUT_SECONDS } from "../lib/env.js";
-import { FreestyleClient } from "@dai/freestyle";
+import { CODESANDBOX_API_KEY, IDLE_TIMEOUT_SECONDS } from "../lib/env.js";
+import { CodeSandboxClient } from "@dai/codesandbox";
 import { MAX_REQUEST_BODY_SIZE } from "../lib/validation.js";
+import { requestSandboxSlot } from "../lib/sandbox-queue.js";
+import * as fs from "fs";
+import * as path from "path";
 
 const router = Router();
 router.use(requireAuth);
 
-function freestyle(): FreestyleClient {
-  const apiKey = FREESTYLE_API_KEY();
+function codesandbox(): CodeSandboxClient {
+  const apiKey = CODESANDBOX_API_KEY();
   if (!apiKey) {
-    throw new Error("FREESTYLE_API_KEY is not configured on the backend");
+    throw new Error("CODESANDBOX_API_KEY is not configured on the backend");
   }
-  return new FreestyleClient(apiKey);
+  return new CodeSandboxClient(apiKey);
 }
 
-/** VM slugs are unique per Freestyle account — suffix the DB id so retries never collide. */
-function vmSlugFor(slug: string, projectId: string, attempt = 0): string {
+function sandboxSlugFor(slug: string, projectId: string, attempt = 0): string {
   const short = projectId.replace(/-/g, "").slice(0, 8);
   const suffix = attempt > 0 ? `-${attempt}` : "";
   return `dai-${slug}-${short}${suffix}`.slice(0, 63);
 }
 
-/**
- * Provision a VM for a project and persist its identity.
- * Shared by POST (first provision) and POST /:id/reprovision (retry).
- */
-async function provisionVM(project: { id: string; slug: string; name: string }, attempt = 0) {
-  const client = freestyle();
-  const slug = vmSlugFor(project.slug, project.id, attempt);
-  // Dev server port 3000 published as https://<slug>.style.dev at create time.
-  const vm = await client.createVM(slug, {
-    idleTimeoutSeconds: IDLE_TIMEOUT_SECONDS(),
-    devPort: 3000,
+function getTemplateId(): string {
+  const templatePath = path.join(process.cwd(), "templates", "dai-universal");
+  if (fs.existsSync(templatePath)) {
+    return templatePath;
+  }
+  return "https://codesandbox.io/s/github/codesandbox/sandbox-templates/tree/main/universal";
+}
+
+export async function provisionSandbox(project: { id: string; slug: string; name: string }, attempt = 0) {
+  const client = codesandbox();
+  const slug = sandboxSlugFor(project.slug, project.id, attempt);
+  const templateId = getTemplateId();
+  const sandbox = await client.createSandbox(templateId, {
+    hibernationTimeoutSeconds: IDLE_TIMEOUT_SECONDS(),
+    privacy: "public",
   });
-  const previewUrl = vm.domain ? `https://${vm.domain}` : null;
+  const previewUrl = sandbox.editorUrl;
 
   const updated = await updateProject(project.id, {
-    vmId: vm.vmId,
-    vmSlug: vm.slug ?? slug,
+    sandboxId: sandbox.sandboxId,
+    sandboxSlug: slug,
     status: "ready",
-    previewDomain: vm.domain,
     previewUrl,
     lastError: null,
   });
-  return { updated, vm };
+  return { updated, sandbox };
 }
 
 router.get("/", async (req: Request, res: Response) => {
@@ -82,24 +87,30 @@ router.post("/", async (req: Request, res: Response) => {
 
     const project = await createProject(user.userId, { slug, name, description });
 
-    // Provision the VM inline so the row's status is accurate on response.
-    // If Freestyle is not configured or fails, the project stays 'provisioning'
-    // with lastError set, and POST /:id/reprovision can retry later.
-    if (!FREESTYLE_API_KEY()) {
+    if (!CODESANDBOX_API_KEY()) {
       await updateProject(project.id, {
-        lastError: "FREESTYLE_API_KEY not configured on backend",
+        lastError: "CODESANDBOX_API_KEY not configured on backend",
       });
-      res.status(201).json({ ...project, status: "provisioning", lastError: "FREESTYLE_API_KEY not configured on backend" });
+      res.status(201).json({ ...project, status: "provisioning", lastError: "CODESANDBOX_API_KEY not configured on backend" });
       return;
     }
 
     try {
-      const { updated, vm } = await provisionVM(project);
-      res.status(201).json({ ...updated, vmId: vm.vmId });
-    } catch (vmError: any) {
-      console.error("[projects:POST] VM provisioning failed:", vmError.message);
-      await updateProject(project.id, { lastError: vmError.message });
-      res.status(201).json({ ...project, status: "provisioning", lastError: vmError.message });
+      const slot = await requestSandboxSlot(user.userId, project.id, "create");
+      if (!slot.acquired) {
+        await updateProject(project.id, { status: "queued", lastError: `Queue full (${slot.activeCount}/10), your request has been queued` });
+        res.status(201).json({ ...project, status: "queued", lastError: `Queue full (${slot.activeCount}/10), your request has been queued` });
+        return;
+      }
+      const { updated } = await provisionSandbox(project);
+      // A slot freed up: kick the worker to drain any queued create/resume jobs.
+      const { processSandboxQueue } = await import("../lib/sandbox-queue.js");
+      void processSandboxQueue();
+      res.status(201).json({ ...updated });
+    } catch (sandboxError: any) {
+      console.error("[projects:POST] Sandbox provisioning failed:", sandboxError.message);
+      await updateProject(project.id, { lastError: sandboxError.message });
+      res.status(201).json({ ...project, status: "provisioning", lastError: sandboxError.message });
     }
   } catch (error: any) {
     console.error("[projects:POST]", error.message);
@@ -108,7 +119,6 @@ router.post("/", async (req: Request, res: Response) => {
   }
 });
 
-// Retry provisioning for a project stuck in 'provisioning' or 'error'.
 router.post("/:id/reprovision", async (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
@@ -117,19 +127,18 @@ router.post("/:id/reprovision", async (req: Request, res: Response) => {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    if (!FREESTYLE_API_KEY()) {
-      res.status(503).json({ error: "FREESTYLE_API_KEY is not configured on the backend" });
+    if (!CODESANDBOX_API_KEY()) {
+      res.status(503).json({ error: "CODESANDBOX_API_KEY is not configured on the backend" });
       return;
     }
 
-    // Clean up a half-created VM from a failed attempt, if any.
-    if (project.vmId) {
-      await freestyle().deleteVM(project.vmId);
+    if (project.sandboxId) {
+      await codesandbox().deleteSandbox(project.sandboxId);
     }
 
-    const attemptMatch = /\-(\d+)$/.exec(project.vmSlug || "");
+    const attemptMatch = /\-(\d+)$/.exec(project.sandboxSlug || "");
     const attempt = attemptMatch ? parseInt(attemptMatch[1]!, 10) + 1 : 0;
-    const { updated } = await provisionVM(project, attempt);
+    const { updated } = await provisionSandbox(project, attempt);
     res.json(updated);
   } catch (error: any) {
     console.error("[projects:reprovision]", error.message);
@@ -152,6 +161,51 @@ router.get("/:id", async (req: Request, res: Response) => {
   }
 });
 
+router.post("/:id/fork", async (req: Request, res: Response) => {
+  try {
+    const user = getAuthUser(req);
+    const project = await getProjectByUser(req.params.id!, user.userId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    if (!CODESANDBOX_API_KEY()) {
+      res.status(503).json({ error: "CODESANDBOX_API_KEY is not configured on the backend" });
+      return;
+    }
+
+    if (!project.sandboxId) {
+      res.status(409).json({ error: "Project sandbox is not provisioned yet" });
+      return;
+    }
+
+    // Fork safety (Item 8): CodeSandboxClient.forkSandbox resumes + hibernates
+    // the source sandbox first, then forks with the documented
+    // sdk.sandboxes.create({ id }) form. For a hibernated parent the fork takes
+    // 1-3s; forking a RUNNING parent would be a limited, slow "Live Fork".
+    // Ref: https://codesandbox.stream/docs/sdk/create + /resume
+    const client = codesandbox();
+    const forkResult = await client.forkSandbox(project.sandboxId);
+
+    const newProject = await createProject(user.userId, {
+      slug: `${project.slug}-fork`,
+      name: `${project.name} (Fork)`,
+      description: project.description ?? undefined,
+    });
+
+    await updateProject(newProject.id, {
+      sandboxId: forkResult.sandboxId,
+      status: "ready",
+      previewUrl: forkResult.editorUrl,
+    });
+
+    res.json({ ...newProject, previewUrl: forkResult.editorUrl, sandboxId: forkResult.sandboxId });
+  } catch (error: any) {
+    console.error("[projects:fork]", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.delete("/:id", async (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
@@ -160,11 +214,11 @@ router.delete("/:id", async (req: Request, res: Response) => {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    if (project.vmId && FREESTYLE_API_KEY()) {
+    if (project.sandboxId && CODESANDBOX_API_KEY()) {
       try {
-        await freestyle().deleteVM(project.vmId);
-      } catch (vmError: any) {
-        console.warn("[projects:DELETE] VM deletion failed:", vmError.message);
+        await codesandbox().deleteSandbox(project.sandboxId);
+      } catch (sandboxError: any) {
+        console.warn("[projects:DELETE] Sandbox deletion failed:", sandboxError.message);
       }
     }
     await deleteProject(project.id);

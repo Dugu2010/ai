@@ -92,9 +92,13 @@ export function CommandPalette({ projectId, commands = [] }: CommandPaletteProps
       className="fixed inset-0 z-50 flex items-start justify-center pt-20"
       onClick={() => setIsOpen(false)}
     >
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
+      <div className="absolute inset-0" style={{ background: "rgba(0, 0, 0, 0.5)" }} aria-hidden="true" />
       <div
-        className="relative w-full max-w-lg bg-secondary rounded-lg shadow-xl border border-tertiary overflow-hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
+        className="relative w-full max-w-lg rounded-lg border border-tertiary overflow-hidden"
+        style={{ background: "var(--bg-card)", boxShadow: "var(--shadow-elevated)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 px-4 py-3 border-b border-tertiary">

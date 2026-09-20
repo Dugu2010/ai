@@ -27,7 +27,7 @@ export const JWT_ISSUER = () => getEnv("JWT_ISSUER", "dai-app");
 export const JWT_EXPIRATION_SECONDS = () =>
   parseInt(process.env.JWT_EXPIRATION_SECONDS || "604800", 10); // 7 days
 
-export const FREESTYLE_API_KEY = () => getEnv("FREESTYLE_API_KEY", "");
+export const CODESANDBOX_API_KEY = () => getEnv("CODESANDBOX_API_KEY", "");
 export const NIM_API_KEY = () => getEnv("NIM_API_KEY", "");
 export const NIM_BASE_URL = () =>
   getEnv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1");
@@ -37,4 +37,4 @@ export const ENCRYPTION_KEY = () => getEnv("DAI_API_KEY_ENCRYPTION_KEY", "");
 export const IDLE_TIMEOUT_SECONDS = () =>
   parseInt(process.env.DAI_IDLE_TIMEOUT_SECONDS || "30", 10);
 export const PREVIEW_DOMAIN_SUFFIX = () =>
-  getEnv("DAI_PREVIEW_DOMAIN_SUFFIX", "style.dev");
+  getEnv("DAI_PREVIEW_DOMAIN_SUFFIX", "csb.app");

@@ -2,9 +2,13 @@
 
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { isAuthenticated, fetchApi } from "../../../lib/api-client";
-import { useToast, showToast } from "../../../components/toast";
-import { CommandPalette, getDefaultProjectCommands } from "../../../components/command-palette";
+import Editor, { loader } from "@monaco-editor/react";
+import { daiDarkTheme, DAI_DARK_THEME_NAME } from "@/lib/monaco-theme";
+import { isAuthenticated, fetchApi } from "@/lib/api-client";
+import { useToast, showToast } from "@/components/toast";
+import { CommandPalette, getDefaultProjectCommands } from "@/components/command-palette";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { useFocusTrap } from "@/lib/use-focus-trap";
 
 interface FileEntry {
   name: string;
@@ -13,11 +17,19 @@ interface FileEntry {
   size?: number;
 }
 
+interface ToolActivity {
+  name: string;
+  arguments: Record<string, unknown>;
+  success: boolean;
+  result?: string;
+}
+
 interface Message {
   id: string;
   role: "user" | "assistant" | "streaming";
   content: string;
   status?: "pending" | "complete" | "error";
+  toolCalls?: ToolActivity[];
 }
 
 interface Project {
@@ -60,16 +72,16 @@ function Tooltip({ children, content }: { children: React.ReactNode; content: st
 function FileIcon({ fileName }: { fileName: string }) {
   const ext = fileName.split(".").pop()?.toLowerCase() || "";
   const icons: Record<string, React.ReactNode> = {
-    ts: <span className="text-blue-400 font-bold">TS</span>,
-    tsx: <span className="text-blue-400 font-bold">TSX</span>,
-    js: <span className="text-yellow-400 font-bold">JS</span>,
-    jsx: <span className="text-yellow-400 font-bold">JSX</span>,
-    css: <span className="text-purple-400 font-bold">#</span>,
-    html: <span className="text-orange-400 font-bold">&lt;&gt;</span>,
-    json: <span className="text-green-400 font-bold">{}</span>,
-    md: <span className="text-slate-400 font-bold">M</span>,
-    py: <span className="text-blue-300 font-bold">py</span>,
-    folder: <span className="text-blue-500">📁</span>,
+    ts: <span className="font-bold" style={{ color: "var(--info)" }}>TS</span>,
+    tsx: <span className="font-bold" style={{ color: "var(--info)" }}>TSX</span>,
+    js: <span className="font-bold" style={{ color: "var(--warning)" }}>JS</span>,
+    jsx: <span className="font-bold" style={{ color: "var(--warning)" }}>JSX</span>,
+    css: <span style={{ color: "var(--info)", fontWeight: 590 }}>#</span>,
+    html: <span className="font-bold" style={{ color: "var(--warning)" }}>&lt;&gt;</span>,
+    json: <span className="font-bold" style={{ color: "var(--success)" }}>{}</span>,
+    md: <span style={{ color: "var(--text-muted)", fontWeight: 590 }}>M</span>,
+    py: <span className="font-bold" style={{ color: "var(--info)", opacity: 0.8 }}>py</span>,
+    folder: <span style={{ color: "var(--accent-primary)" }}>📁</span>,
   };
   return icons[ext] || icons.folder;
 }
@@ -79,8 +91,8 @@ function AgentIndicator({ state }: { state?: Status["agentState"] }) {
   if (state === "working") {
     return (
       <Tooltip content="Agent is working">
-        <div className="flex items-center gap-1.5 text-emerald-400">
-          <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
+        <div className="flex items-center gap-1.5" style={{ color: "var(--success)" }}>
+          <div className="w-2 h-2 rounded-full animate-pulse" style={{ background: "var(--success)" }} />
           <span className="text-xs font-medium">Working</span>
         </div>
       </Tooltip>
@@ -127,7 +139,7 @@ function Tab({
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-2 px-3 py-2 text-sm border-b-2 transition-colors ${
+      className={`flex items-center gap-2 px-3 min-h-[44px] text-sm border-b-2 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-primary ${
         active
           ? "border-accent-primary text-accent-primary bg-accent-primary/10"
           : "border-transparent text-muted hover:text-primary hover:bg-secondary/50"
@@ -141,6 +153,47 @@ function Tab({
         </span>
       )}
     </button>
+  );
+}
+
+// Cursor-style activity item: shows WHAT the agent did (tool + outcome), never
+// chain-of-thought. Command output is collapsed by default and expandable.
+function ActivityItem({ call }: { call: ToolActivity }) {
+  const [expanded, setExpanded] = useState(false);
+  const argsSummary = Object.entries(call.arguments ?? {})
+    .slice(0, 2)
+    .map(([, value]) => String(value).slice(0, 48))
+    .join(" · ");
+  return (
+    <div className={`command-output ${expanded ? "expanded" : ""}`}>
+      <button
+        onClick={() => setExpanded((prev) => !prev)}
+        aria-expanded={expanded}
+        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left"
+        style={{ minHeight: 44 }}
+      >
+        <span className="flex items-center gap-2 min-w-0">
+          <span
+            className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+            style={{ background: call.success ? "var(--success)" : "var(--danger)" }}
+          />
+          <span className="font-mono text-xs flex-shrink-0" style={{ color: "var(--text-secondary)" }}>
+            {call.name}
+          </span>
+          {argsSummary && (
+            <span className="text-xs truncate" style={{ color: "var(--text-muted)" }}>
+              {argsSummary}
+            </span>
+          )}
+        </span>
+        <span className="text-xs flex-shrink-0" style={{ color: "var(--text-muted)" }}>
+          {expanded ? "Hide" : "Show"}
+        </span>
+      </button>
+      {call.result && (
+        <pre style={{ borderTop: "1px solid var(--border-subtle)" }}>{call.result}</pre>
+      )}
+    </div>
   );
 }
 
@@ -183,9 +236,18 @@ export default function ProjectPage() {
   const [models, setModels] = useState<ProjectModel[]>([]);
   const [selectedModel, setSelectedModel] = useState("");
   const [modelsSource, setModelsSource] = useState<"provider" | "fallback" | null>(null);
+  const [isUpToDate, setIsUpToDate] = useState<boolean | null>(null);
+  const [isArchived, setIsArchived] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  // Below the sm breakpoint the editor degrades to a read-only preview pane.
+  const [isNarrowViewport, setIsNarrowViewport] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+  // Focus trap for the mobile drawer (a11y close-out): Escape closes, Tab
+  // cycles inside, focus returns to the hamburger on close.
+  const drawerRef = useRef<HTMLElement>(null);
+  useFocusTrap(drawerRef, showSidebar, () => setShowSidebar(false));
 
   const fetchProject = useCallback(async () => {
     try {
@@ -212,6 +274,8 @@ export default function ProjectPage() {
       const data = await res.json();
       setStatus(data as Status);
       if ((data as any).previewUrl) setPreviewUrl((data as any).previewUrl);
+      if (data.isUpToDate !== undefined) setIsUpToDate(data.isUpToDate);
+      if (data.isArchived !== undefined) setIsArchived(data.isArchived);
     } catch {}
   }, [projectId]);
 
@@ -294,11 +358,17 @@ export default function ProjectPage() {
         throw new Error(data.error || `Agent request failed (${res.status})`);
       }
       if (data.message) {
-        // Update streaming message with final content
+        // Update streaming message with final content + activity timeline
         setMessages((prev) =>
           prev.map((m) =>
             m.id === streamingId
-              ? { ...m, role: "assistant", status: "complete", content: data.message }
+              ? {
+                  ...m,
+                  role: "assistant",
+                  status: "complete",
+                  content: data.message,
+                  toolCalls: Array.isArray(data.toolCalls) ? data.toolCalls : undefined,
+                }
               : m
           )
         );
@@ -341,12 +411,33 @@ export default function ProjectPage() {
     }
   }, [projectId, selectedFile, saving, fileContent, fetchFiles, showToast]);
 
+  // Item 3: non-blocking agent-update banner. Restart is user-initiated, never
+  // forced. Calls Sandboxes.restart via POST /api/workspace/:id/restart.
+  const restartSandbox = useCallback(async () => {
+    setRestarting(true);
+    try {
+      const res = await fetchApi(`/api/workspace/${projectId}/restart`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Restart failed");
+      showToast("Sandbox restarting with latest agent", "success");
+      await fetchStatus();
+    } catch (err: any) {
+      showToast(err.message || "Failed to restart sandbox", "error");
+    } finally {
+      setRestarting(false);
+    }
+  }, [projectId, fetchStatus, showToast]);
+
+  // Item 9: go through the backend proxy. It explicitly resumes a hibernated
+  // sandbox (no automatic HTTP wakeup on the csb.app host), makes sure the dev
+  // task is running, waits for the port, then returns a signed host URL.
+  // Ref: https://codesandbox.stream/docs/sdk/resume
   const startPreview = useCallback(async () => {
     if (!project) return;
     try {
-      const res = await fetchApi(`/api/workspace/${projectId}/preview`, {
+      const res = await fetchApi(`/api/workspace/${projectId}/preview/proxy`, {
         method: "POST",
-        body: JSON.stringify({ command: "npm run dev", port: 3000 }),
+        body: JSON.stringify({ port: 3000 }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to start preview");
@@ -354,6 +445,8 @@ export default function ProjectPage() {
         setPreviewUrl(data.url);
         await fetchStatus();
         showToast("Preview started", "success");
+      } else {
+        showToast("Preview is still warming up — try again in a moment", "info");
       }
     } catch {
       showToast("Failed to start preview", "error");
@@ -394,11 +487,30 @@ export default function ProjectPage() {
 
   const commands = getDefaultProjectCommands(projectId);
 
+  // Monaco theme registration. defineTheme runs when the AMD loader resolves
+  // monaco (before any editor mounts); setTheme makes dai-dark the default so
+  // no "vs"/"vs-dark" fallback ever renders.
+  useEffect(() => {
+    loader.init().then((monaco) => {
+      monaco.editor.defineTheme(DAI_DARK_THEME_NAME, daiDarkTheme);
+      monaco.editor.setTheme(DAI_DARK_THEME_NAME);
+    });
+  }, []);
+
+  // Track the sm breakpoint (640px) for the read-only editor fallback.
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 639px)");
+    const update = () => setIsNarrowViewport(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
+
   if (loading) {
     return (
        <div className="min-h-screen bg-primary text-primary flex items-center justify-center">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-500 border-t-transparent mx-auto mb-4" />
+          <div className="animate-spin rounded-full h-12 w-12 border-4 border-accent-primary border-t-transparent mx-auto mb-4" />
           <p className="text-muted">Loading project...</p>
         </div>
       </div>
@@ -412,8 +524,8 @@ export default function ProjectPage() {
           <h2 className="text-2xl font-bold mb-2">Project not found</h2>
            <p className="text-muted mb-6">This project may have been deleted or doesn't exist.</p>
           <button
-            onClick={() => router.push("/")}
-            className="px-4 py-2 bg-accent-primary rounded-lg hover:bg-accent-hover transition-colors"
+            onClick={() => router.push("/app/projects")}
+            className="btn btn-primary px-6"
           >
             Back to Dashboard
           </button>
@@ -424,16 +536,42 @@ export default function ProjectPage() {
 
   return (
     <div className="min-h-screen bg-primary text-primary flex flex-col overflow-x-hidden">
+      {/* Skip-to-content (a11y 2F) — first focusable element on the page */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] btn btn-primary"
+      >
+        Skip to content
+      </a>
       <CommandPalette projectId={projectId} commands={commands} />
       
       {error && (
-        <div className="bg-red-500/10 border-b border-red-500/50 p-3 flex justify-between items-center">
-          <span className="text-red-400">{error}</span>
+        <div className="p-3 flex justify-between items-center border-b" style={{ background: "color-mix(in srgb, var(--danger) 10%, transparent)", borderColor: "color-mix(in srgb, var(--danger) 35%, transparent)" }}>
+          <span style={{ color: "var(--danger)" }}>{error}</span>
           <button
             onClick={handleRetry}
-            className="px-3 py-1 bg-red-600/50 rounded-lg hover:bg-red-600 text-sm transition-colors"
+            className="btn btn-danger h-9 min-h-0 px-3 text-xs"
           >
             Retry
+          </button>
+        </div>
+      )}
+
+      {isArchived && (
+        <div className="p-3 border-b" style={{ background: "color-mix(in srgb, var(--warning) 10%, transparent)", borderColor: "color-mix(in srgb, var(--warning) 35%, transparent)" }}>
+          <span className="text-sm" style={{ color: "var(--warning)" }}>This project is in cold storage (&gt;7 days since last access). Opening may take up to a minute.</span>
+        </div>
+      )}
+
+      {isUpToDate === false && (
+        <div className="p-3 flex justify-between items-center gap-3 border-b" style={{ background: "color-mix(in srgb, var(--accent-primary) 10%, transparent)", borderColor: "color-mix(in srgb, var(--accent-primary) 35%, transparent)" }}>
+          <span className="text-sm" style={{ color: "var(--accent-hover)" }}>Your agent is not up to date. Restart to get latest features?</span>
+          <button
+            onClick={restartSandbox}
+            disabled={restarting}
+            className="btn btn-primary h-9 min-h-0 px-3 text-xs whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {restarting ? "Restarting..." : "Restart"}
           </button>
         </div>
       )}
@@ -441,30 +579,42 @@ export default function ProjectPage() {
       {/* Status Bar */}
        <div className="bg-secondary border-b border-tertiary px-4 py-1.5 flex justify-between items-center text-xs">
         <div className="flex items-center gap-4">
+          {/* Drawer trigger — visible below lg, where the desktop sidebar hides (2F) */}
+          <button
+            onClick={() => setShowSidebar(true)}
+            aria-label="Open navigation sidebar"
+            className="lg:hidden w-11 h-11 -my-2 flex items-center justify-center rounded hover:bg-secondary"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
            <span className="text-muted">Project: {project.name}</span>
           <AgentIndicator state={status?.agentState} />
         </div>
          <div className="flex items-center gap-4 text-muted">
           <span>{status?.state || "Ready"}</span>
           <span>Last activity: {status?.lastActivity || "Just now"}</span>
+          <ThemeToggle />
         </div>
       </div>
 
-      <div ref={overlayRef} className="flex-1 relative flex flex-col">
+      <div ref={overlayRef} id="main-content" className="flex-1 relative flex flex-col">
         {/* Mobile sidebar overlay */}
         {showSidebar && (
-          <div className="fixed inset-0 z-40 md:hidden">
-            <div className="absolute inset-0 bg-black/50" />
-            <aside className="absolute left-0 top-0 h-full w-64 max-w-[80vw] bg-primary border-r border-tertiary flex flex-col">
+          <div className="fixed inset-0 z-40 lg:hidden">
+            <div className="absolute inset-0" style={{ background: "rgba(0, 0, 0, 0.5)" }} aria-hidden="true" />
+            <aside ref={drawerRef} className="absolute left-0 top-0 h-full w-64 max-w-[80vw] bg-primary border-r border-tertiary flex flex-col">
                <div className="p-4 border-b border-tertiary flex justify-between items-center">
                 <div>
                   <h2 className="font-semibold">{project.name}</h2>
                    <p className="text-sm text-muted">{project.slug}</p>
                 </div>
-                <button
-                  onClick={() => setShowSidebar(false)}
-                   className="p-1 hover:bg-secondary rounded"
-                >
+                  <button
+                    onClick={() => setShowSidebar(false)}
+                    aria-label="Close sidebar"
+                    className="w-11 h-11 flex items-center justify-center hover:bg-secondary rounded"
+                  >
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                   </svg>
@@ -489,7 +639,7 @@ export default function ProjectPage() {
                             setActiveTab("files");
                             setShowSidebar(false);
                           }}
-                           className={`flex items-center gap-2 text-left w-full px-2 py-1.5 rounded text-sm transition-colors ${
+                           className={`flex items-center gap-2 text-left w-full px-2 py-1.5 min-h-[44px] rounded text-sm transition-colors ${
                              selectedFile === f.path ? "bg-accent-primary" : "hover:bg-secondary"
                           }`}
                         >
@@ -507,7 +657,7 @@ export default function ProjectPage() {
             <div className="p-4 border-t border-tertiary">
                 <button
                   onClick={startPreview}
-                  className="w-full px-3 py-2 bg-emerald-600 rounded-lg hover:bg-emerald-700 text-sm transition-colors"
+                  className="btn btn-primary w-full"
                 >
                   Start Preview
                 </button>
@@ -545,7 +695,7 @@ export default function ProjectPage() {
                             fetchFile(f.path);
                             setActiveTab("files");
                           }}
-                           className={`flex items-center gap-2 text-left w-full px-2 py-1.5 rounded text-sm transition-colors ${
+                           className={`flex items-center gap-2 text-left w-full px-2 py-1.5 min-h-[44px] rounded text-sm transition-colors ${
                              selectedFile === f.path ? "bg-accent-primary" : "hover:bg-secondary"
                           }`}
                         >
@@ -564,7 +714,7 @@ export default function ProjectPage() {
             <div className="p-4 border-t">
               <button
                 onClick={startPreview}
-                className="w-full px-3 py-2 bg-emerald-600 rounded-lg hover:bg-emerald-700 text-white text-sm transition-colors"
+                className="btn btn-primary w-full"
               >
                 Start Preview
               </button>
@@ -610,48 +760,86 @@ export default function ProjectPage() {
                     <button
                       onClick={saveFile}
                       disabled={saving || !selectedFile}
-                      className="px-3 py-1 bg-accent-primary rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      className="btn btn-primary h-11 min-h-[44px] px-3 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {saving ? "Saving..." : "Save"}
                     </button>
                   </div>
-                  <textarea
-                    value={fileContent}
-                    onChange={(e) => setFileContent(e.target.value)}
-                        className="flex-1 bg-primary p-4 font-mono text-sm resize-none outline-none"
-                    placeholder="Select a file to edit..."
-                  />
+                  {isNarrowViewport ? (
+                    /* Below sm the editor is a read-only preview (2F). */
+                    <pre
+                      aria-label="Read-only file preview"
+                      className="flex-1 bg-primary p-4 font-mono text-sm overflow-auto whitespace-pre"
+                    >
+                      {fileContent || "Select a file to edit..."}
+                    </pre>
+                  ) : (
+                    <Editor
+                      height="100%"
+                      theme={DAI_DARK_THEME_NAME}
+                      language={undefined}
+                      value={fileContent}
+                      onChange={(value) => setFileContent(value ?? "")}
+                      beforeMount={(monaco) => {
+                        monaco.editor.defineTheme(DAI_DARK_THEME_NAME, daiDarkTheme);
+                      }}
+                      onMount={(editor, monaco) => {
+                        monaco.editor.setTheme(DAI_DARK_THEME_NAME);
+                        editor.focus();
+                      }}
+                      options={{
+                        fontFamily: "JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, monospace",
+                        fontSize: 13,
+                        minimap: { enabled: false },
+                        readOnly: false,
+                      }}
+                    />
+                  )}
                 </div>
               )}
 
               {activeTab === "chat" && (
                 <div className="flex-1 flex flex-col">
                   <div className="flex-1 overflow-auto p-4 space-y-4">
-                    {messages.map((m) => (
-                      <div
-                        key={m.id}
-                        className={`p-3 rounded-lg text-sm max-w-[85%] ${
-                          m.role === "user"
-                        ? "bg-accent-primary self-end"
-                        : m.role === "streaming"
-                        ? "bg-secondary/50 border border-tertiary"
-                        : "bg-secondary"
-                        }`}
-                      >
-                        {m.role === "streaming" ? (
-                          <div className="flex items-center gap-2">
-                            <div className="flex gap-0.5">
-                              <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                              <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                              <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                    {messages.map((m) => {
+                      if (m.role === "streaming") {
+                        return (
+                          <div key={m.id} className="bg-secondary/50 border border-tertiary p-3 rounded-lg text-sm max-w-[85%]">
+                            <div className="flex items-center gap-2">
+                              <div className="flex gap-0.5">
+                                <div className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: "var(--accent-primary)", animationDelay: "0ms" }} />
+                                <div className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: "var(--accent-primary)", animationDelay: "150ms" }} />
+                                <div className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: "var(--accent-primary)", animationDelay: "300ms" }} />
+                              </div>
+                              <span style={{ color: "var(--text-muted)" }}>Agent is working…</span>
                             </div>
-                            <span className="text-muted">Agent is thinking...</span>
                           </div>
-                        ) : (
-                          <p>{m.content}</p>
-                        )}
-                      </div>
-                    ))}
+                        );
+                      }
+                      return (
+                        <div key={m.id} className={`flex flex-col gap-2 w-full ${m.role === "user" ? "items-end" : "items-start"}`}>
+                          {m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0 && (
+                            <div className="w-full max-w-[85%] space-y-2">
+                              {m.toolCalls.map((call, i) => (
+                                <ActivityItem key={`${m.id}-activity-${i}`} call={call} />
+                              ))}
+                            </div>
+                          )}
+                          {m.content && (
+                            <div
+                              className="p-3 rounded-lg text-sm max-w-[85%]"
+                              style={
+                                m.role === "user"
+                                  ? { background: "var(--accent-primary)", color: "var(--accent-foreground)" }
+                                  : { background: "var(--bg-card)" }
+                              }
+                            >
+                              <p className="whitespace-pre-wrap">{m.content}</p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                     {messages.length === 0 && (
                        <div className="text-center text-muted py-8">
                         <p>Start a conversation with DAI</p>
@@ -669,7 +857,7 @@ export default function ProjectPage() {
                           setSelectedModel(e.target.value);
                           if (e.target.value) saveModel(e.target.value);
                         }}
-                        className="flex-1 max-w-xs px-2 py-1 bg-primary border border-tertiary rounded-lg text-xs outline-none focus:border-accent-primary"
+                        className="flex-1 max-w-xs px-2 min-h-[44px] bg-primary border border-tertiary rounded-lg text-xs outline-none focus:border-accent-primary"
                         title={modelsSource === "fallback" ? "Provider unreachable — showing static list" : "Model used by the agent"}
                       >
                         {selectedModel && !models.some((m) => m.id === selectedModel) && (
@@ -681,7 +869,7 @@ export default function ProjectPage() {
                         ))}
                       </select>
                       {modelsSource === "fallback" && (
-                        <span className="text-xs text-amber-500" title="Could not reach provider">(cached)</span>
+                        <span className="text-xs" style={{ color: "var(--warning)" }} title="Could not reach provider">(cached)</span>
                       )}
                     </div>
                     <div className="flex gap-2">
@@ -691,13 +879,14 @@ export default function ProjectPage() {
                         onChange={(e) => setInput(e.target.value)}
                         onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
                         placeholder="Ask DAI..."
-                         className="flex-1 px-3 py-2 bg-primary border border-tertiary rounded-lg outline-none focus:border-accent-primary"
+                          className="flex-1 px-3 min-h-[44px] bg-primary border border-tertiary rounded-lg outline-none focus:border-accent-primary"
                         disabled={sending}
                       />
                       <button
                         onClick={sendMessage}
                         disabled={sending}
-                         className="px-4 py-2 bg-accent-primary rounded-lg hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        aria-label="Send message"
+                        className="btn btn-primary px-4 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {sending ? "..." : "Send"}
                       </button>
@@ -720,7 +909,7 @@ export default function ProjectPage() {
                          <p className="text-muted mb-4">No preview running</p>
                         <button
                           onClick={startPreview}
-                          className="px-4 py-2 bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors"
+                          className="btn btn-primary px-6"
                         >
                           Start Preview
                         </button>

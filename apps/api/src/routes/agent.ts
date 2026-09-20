@@ -11,8 +11,8 @@ import { NIMClient, type ToolDefinition, type ChatMessage, type ToolCall } from 
 import { requireAuth, getAuthUser } from "../lib/auth.js";
 import { resolveNimConfig } from "../lib/nim-config.js";
 import { validatePath, validateCommandOptions, MAX_TIMEOUT_MS } from "../lib/validation.js";
-import { FREESTYLE_API_KEY } from "../lib/env.js";
-import { FreestyleClient } from "@dai/freestyle";
+import { CODESANDBOX_API_KEY } from "../lib/env.js";
+import { CodeSandboxClient } from "@dai/codesandbox";
 
 const router = Router();
 router.use(requireAuth);
@@ -104,7 +104,7 @@ const TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "run_command",
-      description: "Execute a shell command in the project VM",
+      description: "Execute a shell command in the project sandbox",
       parameters: {
         type: "object",
         properties: {
@@ -181,9 +181,8 @@ function toWireToolCalls(calls: ToolCall[]) {
   }));
 }
 
-/** Execute one agent tool call against the Freestyle VM. */
 async function executeTool(
-  client: FreestyleClient,
+  client: CodeSandboxClient,
   name: string,
   args: Record<string, unknown>
 ): Promise<{ result: string; success: boolean }> {
@@ -224,7 +223,6 @@ async function executeTool(
         if (first === -1) return { result: "Error: oldString not found in file", success: false };
         const second = current.indexOf(oldStr, first + 1);
         if (second !== -1) {
-          // Ambiguous match — require the model to include more context.
           return { result: "Error: oldString matches multiple locations; include more surrounding text", success: false };
         }
         await client.writeTextFile(v.normalized, current.slice(0, first) + newStr + current.slice(first + oldStr.length));
@@ -286,20 +284,19 @@ async function executeTool(
         if (!command || !port || port < 1 || port > 65535) {
           return { result: "Error: command and valid port required", success: false };
         }
-        await client.startDevServer("/workspace", command, port, { sessionSlug: "dev-server" });
-        // Give the server a moment to boot, then report honestly.
-        const up = await client.waitForPort(port, 30_000);
-        const domainSuffix = process.env.DAI_PREVIEW_DOMAIN_SUFFIX || "style.dev";
-        const url = await client.getPreviewUrl(port, domainSuffix);
+        await client.startDevServer("/workspace", command, port);
+        const up = await client.waitForPort(port);
+        const domainSuffix = process.env.DAI_PREVIEW_DOMAIN_SUFFIX || "csb.app";
+        const url = await client.getPreviewUrl(port);
         return {
           result: up
-            ? `Dev server is up at ${url}`
-            : `Dev server process started at ${url} but the port is not answering yet — it may still be booting.`,
+            ? `Dev server is up at ${url.url}`
+            : `Dev server process started at ${url.url} but the port is not answering yet — it may still be booting.`,
           success: true,
         };
       }
       case "stop_dev_server": {
-        await client.stopDevServer("dev-server");
+        await client.stopDevServer();
         return { result: "Dev server stopped", success: true };
       }
       default:
@@ -311,7 +308,7 @@ async function executeTool(
 }
 
 router.post("/:id/agent", async (req: Request, res: Response) => {
-  let freestyleClient: FreestyleClient | null = null;
+  let codesandboxClient: CodeSandboxClient | null = null;
   try {
     const user = getAuthUser(req);
     const project = await getProjectByUser(req.params.id!, user.userId);
@@ -329,24 +326,19 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
     const nimConfig = await resolveNimConfig(user.userId);
     const nim = new NIMClient(nimConfig.apiKey, nimConfig.baseURL, nimConfig.model);
 
-    // VM setup — needed for tools. Agent still answers chat if VM is missing.
-    let vmReady = false;
-    if (project.vmId && FREESTYLE_API_KEY()) {
-      freestyleClient = new FreestyleClient(FREESTYLE_API_KEY());
-      freestyleClient.refVM(project.vmId);
+    let sandboxReady = false;
+    if (project.sandboxId && CODESANDBOX_API_KEY()) {
+      codesandboxClient = new CodeSandboxClient(CODESANDBOX_API_KEY());
       try {
-        const vm = await freestyleClient.getVM(project.vmId);
-        vmReady = vm?.state === "running" || vm?.state === "starting";
-        if (vm?.state === "paused" || vm?.state === "stopped") {
-          await freestyleClient.startVM();
-          vmReady = true;
-        }
+        await codesandboxClient.openSandbox(project.sandboxId);
+        // openSandbox → resumeSandbox throws on failure, so reaching this line
+        // means the sandbox is booted and the client is connected.
+        sandboxReady = true;
       } catch {
-        vmReady = false;
+        sandboxReady = false;
       }
     }
 
-    // Conversation
     let convId: string = conversationId;
     if (!convId) {
       const existing = await getActiveConversation(project.id);
@@ -357,20 +349,17 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
     const history = await listMessages(convId);
 
     const systemPrompt = [
-      "You are DAI, an expert coding agent working inside a project VM.",
+      "You are DAI, an expert coding agent working inside a project sandbox.",
       "Project files live under /workspace. Use the provided tools to inspect, create, edit, and run code.",
       "Prefer edit_file for small changes and write_file for new files.",
       "Always use tools to verify state before claiming success. Be concise and practical.",
-      vmReady ? "" : "NOTE: The VM is not available right now; answer general questions but explain you cannot edit files.",
+      sandboxReady ? "" : "NOTE: The sandbox is not available right now; answer general questions but explain you cannot edit files.",
     ]
       .filter(Boolean)
       .join(" ");
 
     const messages: ChatMessage[] = [
       { role: "system", content: systemPrompt },
-      // Skip old tool-role messages: tools may differ from the current session's
-      // and tool_call_id pairing must stay consistent; the assistant's summary
-      // of what it did is already in the stored content.
       ...history
         .slice(-40)
         .filter((m) => m.role === "user" || m.role === "assistant")
@@ -380,24 +369,20 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
 
     await addMessage(convId, { role: "user", content: message });
 
-    // Agentic loop
     let finalContent: string | null = null;
     const allToolCalls: { name: string; arguments: Record<string, unknown>; success: boolean; result?: string }[] = [];
 
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-      const response = await nim.chat({ messages, tools: vmReady ? TOOLS : undefined });
+      const response = await nim.chat({ messages, tools: sandboxReady ? TOOLS : undefined });
 
       if (response.content) {
         finalContent = response.content;
       }
 
-      if (response.toolCalls.length === 0 || !vmReady) {
+      if (response.toolCalls.length === 0 || !sandboxReady) {
         break;
       }
 
-      // Record the assistant's tool request verbatim (wire format), then
-      // answer each call with a proper role:"tool" message carrying its
-      // tool_call_id — the OpenAI-compatible contract NIM follows.
       messages.push({
         role: "assistant",
         content: response.content ?? null,
@@ -405,7 +390,7 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       });
 
       for (const call of response.toolCalls) {
-        const { result, success } = await executeTool(freestyleClient!, call.name, call.arguments);
+        const { result, success } = await executeTool(codesandboxClient!, call.name, call.arguments);
         allToolCalls.push({ name: call.name, arguments: call.arguments, success, result: result.slice(0, 500) });
         messages.push({
           role: "tool",

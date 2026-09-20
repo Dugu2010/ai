@@ -29,12 +29,16 @@ export interface Project {
   name: string;
   description: string | null;
   userId: UUID;
+  /** CodeSandbox sandbox id backing this project, once provisioned. */
+  sandboxId: string | null;
+  /** CodeSandbox slug used to address the sandbox (e.g. `dai-<slug>`). */
+  sandboxSlug: string | null;
   /** Freestyle VM id backing this project, once provisioned. */
   vmId: string | null;
   /** Freestyle slug used to address the VM (e.g. `dai-<slug>`). */
   vmSlug: string | null;
   status: ProjectStatus;
-  /** The `<slug>.style.dev` domain routed to the dev server. */
+  /** The `<slug>.csb.app` domain routed to the dev server. */
   previewDomain: string | null;
   previewPort: number | null;
   /** Public HTTPS URL of the live preview, if routed. */
@@ -43,6 +47,14 @@ export interface Project {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+  /** When the sandbox was last accessed for cold-storage warning (>7 days). */
+  lastAccessedAt: string | null;
+  /** Whether the sandbox is currently hibernated (for preview proxy). */
+  isHibernated: boolean;
+  /** Sandbox bootup type on last resume (RUNNING | CLEAN | RESUME | FORK). Matches Sandbox.bootupType in @codesandbox/sdk. */
+  bootupType: "CLEAN" | "RESUME" | "RUNNING" | "FORK" | null;
+  /** Whether sandbox agent version is up to date. */
+  isUpToDate: boolean | null;
 }
 
 /* ---------------- Filesystem ---------------- */

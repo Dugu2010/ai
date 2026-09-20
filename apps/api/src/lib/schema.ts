@@ -21,6 +21,8 @@ export async function ensureSchema(): Promise<void> {
       slug TEXT NOT NULL,
       name TEXT NOT NULL,
       description TEXT,
+      sandbox_id TEXT,
+      sandbox_slug TEXT,
       vm_id TEXT,
       vm_slug TEXT,
       status TEXT NOT NULL DEFAULT 'provisioning',
@@ -31,8 +33,38 @@ export async function ensureSchema(): Promise<void> {
       last_error TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_accessed_at TIMESTAMPTZ,
+      is_hibernated BOOLEAN NOT NULL DEFAULT false,
+      bootup_type TEXT,
+      is_up_to_date BOOLEAN,
       UNIQUE (user_id, slug)
     );
+
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS sandbox_id TEXT;
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS sandbox_slug TEXT;
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS last_accessed_at TIMESTAMPTZ;
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_hibernated BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS bootup_type TEXT;
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_up_to_date BOOLEAN;
+
+    CREATE TABLE IF NOT EXISTS sandbox_queue (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      status TEXT NOT NULL DEFAULT 'queued',
+      position BIGINT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      claimed_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sandbox_queue_status ON sandbox_queue(status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_sandbox_queue_project ON sandbox_queue(project_id);
 
     CREATE TABLE IF NOT EXISTS conversations (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

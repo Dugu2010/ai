@@ -37,8 +37,9 @@ module.exports = {
         DEFAULT: 'rgb(var(--border-color-rgb) / <alpha-value>)',
       },
       fontFamily: {
-        sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
-        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        // Delegates to the CSS font tokens in globals.css (--font-sans/--font-mono)
+        sans: ['var(--font-sans)'],
+        mono: ['var(--font-mono)'],
       },
       boxShadow: {
         soft: '0 2px 12px rgba(0,0,0,0.08)',
