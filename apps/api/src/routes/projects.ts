@@ -5,8 +5,6 @@ import { CODESANDBOX_API_KEY, IDLE_TIMEOUT_SECONDS } from "../lib/env.js";
 import { CodeSandboxClient } from "@dai/codesandbox";
 import { MAX_REQUEST_BODY_SIZE } from "../lib/validation.js";
 import { requestSandboxSlot } from "../lib/sandbox-queue.js";
-import * as fs from "fs";
-import * as path from "path";
 
 const router = Router();
 router.use(requireAuth);
@@ -25,19 +23,14 @@ function sandboxSlugFor(slug: string, projectId: string, attempt = 0): string {
   return `dai-${slug}-${short}${suffix}`.slice(0, 63);
 }
 
-function getTemplateId(): string {
-  const templatePath = path.join(process.cwd(), "templates", "dai-universal");
-  if (fs.existsSync(templatePath)) {
-    return templatePath;
-  }
-  return "https://codesandbox.io/s/github/codesandbox/sandbox-templates/tree/main/universal";
-}
+// Template built via `npx @codesandbox/sdk build ./sandbox --ports 3000`
+// Rebuild this template when the base project changes.
+const DAI_TEMPLATE_ID = "k8dsq1";
 
 export async function provisionSandbox(project: { id: string; slug: string; name: string }, attempt = 0) {
   const client = codesandbox();
   const slug = sandboxSlugFor(project.slug, project.id, attempt);
-  const templateId = getTemplateId();
-  const sandbox = await client.createSandbox(templateId, {
+  const sandbox = await client.createSandbox(DAI_TEMPLATE_ID, {
     hibernationTimeoutSeconds: IDLE_TIMEOUT_SECONDS(),
     privacy: "public",
   });
