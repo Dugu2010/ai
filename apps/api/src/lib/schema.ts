@@ -78,11 +78,12 @@ export async function ensureSchema(): Promise<void> {
     CREATE TABLE IF NOT EXISTS messages (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-      role TEXT NOT NULL,
+      project_id UUID,
+      role TEXT NOT NULL,          -- user | assistant | tool
       content TEXT,
-      tool_calls JSONB,
-      tool_results JSONB,
-      message_name TEXT,
+      tool_name TEXT,
+      tool_args JSONB,
+      tool_result JSONB,
       prompt_tokens INTEGER,
       completion_tokens INTEGER,
       total_tokens INTEGER,

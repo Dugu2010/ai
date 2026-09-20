@@ -31,7 +31,8 @@ export const CODESANDBOX_API_KEY = () => getEnv("CODESANDBOX_API_KEY", "");
 export const NIM_API_KEY = () => getEnv("NIM_API_KEY", "");
 export const NIM_BASE_URL = () =>
   getEnv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1");
-export const NIM_MODEL = () => getEnv("NIM_MODEL", "meta/llama-3.1-405b-instruct");
+export const NIM_MODEL = () =>
+  getEnv("NIM_MODEL", "openai/gpt-oss-20b");
 export const ENCRYPTION_KEY = () => getEnv("DAI_API_KEY_ENCRYPTION_KEY", "");
 
 export const IDLE_TIMEOUT_SECONDS = () =>

@@ -73,8 +73,6 @@ export class CodeSandboxClient {
     const automaticWakeupConfig = opts.automaticWakeupConfig ?? { http: true, websocket: false };
 
     const sandbox = await this.sdk.sandboxes.create({
-      // `id` is the fork source (template or sandbox id) per Sandboxes.create():
-      // "What template to fork from, this is the id of another sandbox."
       id: templateId || undefined,
       vmTier,
       hibernationTimeoutSeconds,
@@ -86,6 +84,26 @@ export class CodeSandboxClient {
     this.sandbox = sandbox;
     this.client = client;
     this.sandboxId = sandbox.id;
+
+    let bootupType = sandbox.bootupType;
+    if (bootupType === "CLEAN") {
+      for (const step of client.setup.getSteps()) {
+        await step.waitUntilComplete();
+      }
+      bootupType = "RUNNING";
+    }
+    const maxPoll = 60;
+    let pollCount = 0;
+    while (bootupType !== "RUNNING" && bootupType !== "RESUME" && pollCount < maxPoll) {
+      await new Promise((r) => setTimeout(r, 2000));
+      pollCount++;
+      try {
+        const info = await this.sdk.sandboxes.get(sandbox.id);
+        bootupType = (info as any).bootupType ?? bootupType;
+      } catch {
+        break;
+      }
+    }
 
     return { sandboxId: sandbox.id, editorUrl: client.editorUrl };
   }

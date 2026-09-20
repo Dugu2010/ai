@@ -593,14 +593,18 @@ export async function addMessage(
   {
     role,
     content,
-    toolCalls,
-    toolResults,
+    projectId,
+    toolName,
+    toolArgs,
+    toolResult,
     usage,
   }: {
     role: string;
     content: string | null;
-    toolCalls?: any[];
-    toolResults?: any[];
+    projectId?: string;
+    toolName?: string;
+    toolArgs?: Record<string, unknown>;
+    toolResult?: { success: boolean; result: string };
     usage?: { promptTokens: number; completionTokens: number; totalTokens: number } | null;
   }
 ): Promise<ChatMessage> {
@@ -609,21 +613,24 @@ export async function addMessage(
     conversation_id: string;
     role: string;
     content: string | null;
-    tool_calls: any;
-    tool_results: any;
+    tool_name: string | null;
+    tool_args: any;
+    tool_result: any;
     message_name: string | null;
     prompt_tokens: number | null;
     completion_tokens: number | null;
     total_tokens: number | null;
     created_at: string;
   }>(
-    `INSERT INTO messages (conversation_id, role, content, tool_calls, tool_results, prompt_tokens, completion_tokens, total_tokens) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, conversation_id, role, content, tool_calls, tool_results, message_name, prompt_tokens, completion_tokens, total_tokens, created_at`,
+    `INSERT INTO messages (conversation_id, project_id, role, content, tool_name, tool_args, tool_result, prompt_tokens, completion_tokens, total_tokens) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id, conversation_id, role, content, tool_name, tool_args, tool_result, message_name, prompt_tokens, completion_tokens, total_tokens, created_at`,
     [
       conversationId,
+      projectId ?? null,
       role,
       content ?? null,
-      toolCalls ? JSON.stringify(toolCalls) : null,
-      toolResults ? JSON.stringify(toolResults) : null,
+      toolName ?? null,
+      toolArgs ? JSON.stringify(toolArgs) : null,
+      toolResult ? JSON.stringify(toolResult) : null,
       usage?.promptTokens ?? null,
       usage?.completionTokens ?? null,
       usage?.totalTokens ?? null,
@@ -635,8 +642,9 @@ export async function addMessage(
     conversationId: row.conversation_id,
     role: row.role,
     content: row.content ?? null,
-    toolCalls: row.tool_calls ?? undefined,
-    toolResults: row.tool_results ?? undefined,
+    toolName: row.tool_name ?? undefined,
+    toolArgs: row.tool_args ?? undefined,
+    toolResult: row.tool_result ?? undefined,
     name: row.message_name ?? null,
     usage: row.prompt_tokens !== null || row.completion_tokens !== null || row.total_tokens !== null
       ? { promptTokens: row.prompt_tokens ?? 0, completionTokens: row.completion_tokens ?? 0, totalTokens: row.total_tokens ?? 0 }
@@ -651,15 +659,16 @@ export async function listMessages(conversationId: string): Promise<ChatMessage[
     conversation_id: string;
     role: string;
     content: string | null;
-    tool_calls: any;
-    tool_results: any;
+    tool_name: string | null;
+    tool_args: any;
+    tool_result: any;
     message_name: string | null;
     prompt_tokens: number | null;
     completion_tokens: number | null;
     total_tokens: number | null;
     created_at: string;
   }>(
-    `SELECT id, conversation_id, role, content, tool_calls, tool_results, message_name, prompt_tokens, completion_tokens, total_tokens, created_at FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC`,
+    `SELECT id, conversation_id, role, content, tool_name, tool_args, tool_result, message_name, prompt_tokens, completion_tokens, total_tokens, created_at FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC`,
     [conversationId]
   );
   return res.rows.map((row) => ({
@@ -667,8 +676,9 @@ export async function listMessages(conversationId: string): Promise<ChatMessage[
     conversationId: row.conversation_id,
     role: row.role,
     content: row.content ?? null,
-    toolCalls: row.tool_calls ?? undefined,
-    toolResults: row.tool_results ?? undefined,
+    toolName: row.tool_name ?? undefined,
+    toolArgs: row.tool_args ?? undefined,
+    toolResult: row.tool_result ?? undefined,
     name: row.message_name ?? null,
     usage: row.prompt_tokens !== null || row.completion_tokens !== null || row.total_tokens !== null
       ? { promptTokens: row.prompt_tokens ?? 0, completionTokens: row.completion_tokens ?? 0, totalTokens: row.total_tokens ?? 0 }

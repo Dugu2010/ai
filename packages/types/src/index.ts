@@ -138,6 +138,10 @@ export interface ChatMessage {
   conversationId: UUID;
   role: MessageRole;
   content: string | null;
+  projectId?: UUID;
+  toolName?: string;
+  toolArgs?: Record<string, unknown>;
+  toolResult?: { success: boolean; result: string };
   toolCalls?: AssistantToolCall[];
   toolResults?: ToolExecutionResult[];
   name?: string | null;

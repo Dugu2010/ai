@@ -30,20 +30,20 @@ const DAI_TEMPLATE_ID = "k8dsq1";
 export async function provisionSandbox(project: { id: string; slug: string; name: string }, attempt = 0) {
   const client = codesandbox();
   const slug = sandboxSlugFor(project.slug, project.id, attempt);
-  const sandbox = await client.createSandbox(DAI_TEMPLATE_ID, {
+  const { sandboxId, editorUrl } = await client.createSandbox(DAI_TEMPLATE_ID, {
     hibernationTimeoutSeconds: IDLE_TIMEOUT_SECONDS(),
     privacy: "public",
   });
-  const previewUrl = sandbox.editorUrl;
+  const previewUrl = editorUrl;
 
   const updated = await updateProject(project.id, {
-    sandboxId: sandbox.sandboxId,
+    sandboxId,
     sandboxSlug: slug,
     status: "ready",
     previewUrl,
     lastError: null,
   });
-  return { updated, sandbox };
+  return { updated, sandbox: { sandboxId, editorUrl } };
 }
 
 router.get("/", async (req: Request, res: Response) => {

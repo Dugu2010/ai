@@ -58,21 +58,30 @@ async function ensureSandboxBooted(
   if (!project.sandboxId) {
     return { booted: false, bootupType: null, isUpToDate: null, archived };
   }
-  // Explicit resume. This also reconnects the client and, when bootupType is
-  // CLEAN, waits for all setup steps inside CodeSandboxClient.resumeSandbox().
-  const result = await client.resumeSandbox(project.sandboxId);
-  await updateProject(project.id, {
-    lastAccessedAt: new Date().toISOString(),
-    isHibernated: false,
-    bootupType: result.bootupType,
-    isUpToDate: result.isUpToDate,
-  });
-  return {
-    booted: true,
-    bootupType: result.bootupType,
-    isUpToDate: result.isUpToDate,
-    archived,
-  };
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const result = await client.resumeSandbox(project.sandboxId);
+      await updateProject(project.id, {
+        lastAccessedAt: new Date().toISOString(),
+        isHibernated: false,
+        bootupType: result.bootupType,
+        isUpToDate: result.isUpToDate,
+      });
+      return {
+        booted: true,
+        bootupType: result.bootupType,
+        isUpToDate: result.isUpToDate,
+        archived,
+      };
+    } catch (error: any) {
+      lastError = error;
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
+  }
+  throw Object.assign(new Error(`Sandbox resume failed after retry: ${lastError?.message ?? "unknown"}`), { statusCode: 503 });
 }
 
 /**
@@ -168,12 +177,12 @@ async function sandboxForProject(
     return { client, project, bootupType: null };
   }
   try {
-    // Resume + (on CLEAN boots) wait for all setup steps before any command.
     const booted = await ensureSandboxBooted(client, project);
     return { client, project, bootupType: booted.bootupType };
   } catch (error: any) {
-    // Boot failures must not brick the workspace endpoints; the individual
-    // SDK calls in each route will surface the real error if the VM is down.
+    if (error.statusCode === 503) {
+      throw error;
+    }
     console.warn(`[workspace] sandbox boot failed: ${error?.message ?? error}`);
     return { client, project, bootupType: null };
   }
