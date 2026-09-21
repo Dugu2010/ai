@@ -116,9 +116,91 @@ export async function ensureSchema(): Promise<void> {
       UNIQUE (user_id)
     );
 
+    -- ---------------------------------------------------------------------
+    -- Agent runs: one row per user task. Holds the state machine position and
+    -- the runtime budget actually consumed, so cost is auditable afterwards.
+    -- ---------------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS agent_runs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      conversation_id UUID REFERENCES conversations(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      prompt TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'queued',
+      outcome TEXT,                    -- completed | failed | paused | budget_exhausted
+      stop_reason TEXT,
+      iterations INTEGER NOT NULL DEFAULT 0,
+      tool_calls INTEGER NOT NULL DEFAULT 0,
+      exec_calls INTEGER NOT NULL DEFAULT 0,
+      runtime_activations INTEGER NOT NULL DEFAULT 0,
+      runtime_ms BIGINT NOT NULL DEFAULT 0,
+      files_changed INTEGER NOT NULL DEFAULT 0,
+      sandbox_id TEXT,
+      budget_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      summary TEXT,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      finished_at TIMESTAMPTZ
+    );
+
+    -- ---------------------------------------------------------------------
+    -- Activity timeline. Deliberately high level: titles describe observable
+    -- actions and results, never model reasoning.
+    -- ---------------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS activity_events (
+      id BIGSERIAL PRIMARY KEY,
+      run_id UUID NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+      project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      state TEXT,
+      title TEXT NOT NULL,
+      detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (run_id, seq)
+    );
+
+    -- ---------------------------------------------------------------------
+    -- Undo / rollback. A checkpoint records the exact pre- and post-image of
+    -- every file an agent run is about to change, so restore is a compare and
+    -- swap rather than a blind overwrite.
+    -- ---------------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS checkpoints (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      run_id UUID REFERENCES agent_runs(id) ON DELETE SET NULL,
+      label TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'applied',   -- applied | undone | partial
+      reversible BOOLEAN NOT NULL DEFAULT true,
+      note TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS checkpoint_files (
+      id BIGSERIAL PRIMARY KEY,
+      checkpoint_id UUID NOT NULL REFERENCES checkpoints(id) ON DELETE CASCADE,
+      path TEXT NOT NULL,
+      change_kind TEXT NOT NULL,                -- create | modify | delete | rename
+      content_before TEXT,
+      content_after TEXT,
+      existed_before BOOLEAN NOT NULL,
+      size_before BIGINT NOT NULL DEFAULT 0,
+      size_after BIGINT NOT NULL DEFAULT 0,
+      reversible BOOLEAN NOT NULL DEFAULT true,
+      skip_reason TEXT
+    );
+
+    -- Redo stack: which checkpoints a user has undone, so redo can re-apply.
+    ALTER TABLE checkpoints ADD COLUMN IF NOT EXISTS undone_at TIMESTAMPTZ;
+
     CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
     CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id);
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_runs_project ON agent_runs(project_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_activity_events_run ON activity_events(run_id, seq);
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_project ON checkpoints(project_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_checkpoint_files_ckpt ON checkpoint_files(checkpoint_id);
   `);
 
   // One-time retirement of pre-Modal runtime identifiers.

@@ -13,12 +13,17 @@ export {
   toRuntimeError,
   type RuntimeFailure,
 } from "./errors.js";
+export { RESTORE_MARKER, RESTORE_SCRIPT } from "./restore-script.js";
+export { READ_BATCH_MARKER, READ_BATCH_SCRIPT } from "./read-batch-script.js";
 export type {
   AcquireOptions,
   DevServerHandle,
   ExecResult,
   FileEntry,
+  BatchReadResult,
   PreviewTarget,
+  FileMutation,
+  MutationResult,
   RuntimeService,
   RuntimeState,
   Workspace,

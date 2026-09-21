@@ -173,15 +173,21 @@ export interface Conversation {
   updatedAt: string;
 }
 
-/* SSE events streamed from the server to the browser chat UI. */
+/**
+ * SSE frames streamed from the agent endpoint to the browser.
+ *
+ * Names here match what the server actually writes. The previous version of this
+ * union declared `arguments` where the stream sends `args`, and put the frame
+ * kind in the JSON body when it is carried by the SSE `event:` line.
+ */
 export type AgentEvent =
-  | { type: "activity"; message: string }
+  | { type: "activity"; event: ActivityEvent }
   | { type: "content"; delta: string }
-  | { type: "tool_call"; id: string; name: string; arguments: Record<string, unknown> }
-  | { type: "tool_result"; id: string; result: string; success: boolean; durationMs: number }
+  | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
+  | { type: "tool_result"; id: string; status: "success" | "error"; preview: string }
   | { type: "usage"; usage: MessageUsage }
-  | { type: "error"; error: string }
-  | { type: "done" };
+  | { type: "error"; message: string }
+  | { type: "done"; runId: string; outcome: AgentOutcome; stopReason: string | null };
 
 export interface AgentConfig {
   maxIterations: number;
@@ -201,16 +207,6 @@ export interface AgentToolResult {
   result: string;
   success: boolean;
   durationMs: number;
-}
-
-export interface AgentState {
-  runId: string;
-  status: "running" | "paused" | "completed" | "error" | "canceled";
-  iteration: number;
-  maxIterations: number;
-  currentTool: string | null;
-  createdAt: string;
-  updatedAt: string;
 }
 
 /* ---------------- NIM ---------------- */
@@ -311,3 +307,166 @@ export interface Err {
   code?: string;
 }
 export type Result<T> = Ok<T> | Err;
+
+/* ---------------- Agent runtime: states, activity, checkpoints ----------------
+ * Canonical definitions shared by the API and the browser, so a status string
+ * can never mean two different things on either side.
+ */
+
+/**
+ * Position of the agent state machine. Every value is entered from a real
+ * observed transition in the loop, never from a timer or an animation.
+ */
+export type AgentState =
+  | "queued"
+  | "thinking"
+  | "inspecting"
+  | "searching"
+  | "reading"
+  | "planning"
+  | "editing"
+  | "executing"
+  | "testing"
+  | "building"
+  | "diagnosing"
+  | "fixing"
+  | "verifying"
+  | "previewing"
+  | "completed"
+  | "failed"
+  | "waiting"
+  | "paused";
+
+/** How a run ended. `paused` always arrives with a user-facing stopReason. */
+export type AgentOutcome = "completed" | "failed" | "paused" | "budget_exhausted" | "cancelled";
+
+/** The activity timeline vocabulary; the names are the wire contract. */
+export type ActivityEventType =
+  | "agent.started"
+  | "agent.status"
+  | "agent.file.read"
+  | "agent.file.changed"
+  | "agent.search"
+  | "agent.runtime.requested"
+  | "agent.runtime.started"
+  | "agent.command.started"
+  | "agent.command.completed"
+  | "agent.test.started"
+  | "agent.test.completed"
+  | "agent.preview.started"
+  | "agent.preview.ready"
+  | "agent.error"
+  | "agent.completed"
+  | "agent.loop.detected"
+  | "agent.undo.created"
+  | "agent.undo.restored"
+  | "agent.budget.exhausted";
+
+/**
+ * Facts attached to one event. Common keys are declared for type-safety at the
+ * call sites; the index signature admits event-specific facts (offered choices,
+ * an iteration counter) without every new event widening this interface.
+ */
+export interface ActivityEventDetail {
+  path?: string;
+  paths?: string[];
+  command?: string;
+  pattern?: string;
+  matches?: number;
+  filesRead?: number;
+  changed?: number;
+  exitCode?: number | null;
+  failed?: number;
+  durationMs?: number;
+  timedOut?: boolean;
+  sandboxId?: string;
+  reused?: boolean;
+  iterations?: number;
+  runtimeMs?: number;
+  checkpointId?: string;
+  port?: number;
+  url?: string;
+  reason?: string;
+  kind?: string;
+  choices?: string[];
+  [key: string]: unknown;
+}
+
+export interface ActivityEvent {
+  id: number;
+  runId: string;
+  seq: number;
+  type: ActivityEventType;
+  state: AgentState | null;
+  /** One short, high-level sentence. Never model reasoning, never raw JSON. */
+  title: string;
+  detail: ActivityEventDetail;
+  createdAt: string;
+}
+
+export interface AgentRunCounts {
+  iterations: number;
+  toolCalls: number;
+  execCalls: number;
+  runtimeActivations: number;
+  runtimeMs: number;
+  filesChanged: number;
+}
+
+export interface AgentRun {
+  id: string;
+  projectId: string;
+  conversationId: string | null;
+  prompt: string;
+  state: AgentState;
+  outcome: AgentOutcome | null;
+  stopReason: string | null;
+  counts: AgentRunCounts;
+  sandboxId: string | null;
+  summary: string | null;
+  lastError: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+}
+
+/** Everything the workspace needs to render status and its controls. */
+export interface RunStatus {
+  run: AgentRun | null;
+  events: ActivityEvent[];
+  limits: {
+    maxActivationsPerRun: number;
+    maxExecCallsPerRun: number;
+    maxRuntimeSecondsPerRun: number;
+    maxAgentIterations: number;
+  };
+  canUndo: boolean;
+  canRedo: boolean;
+  canContinue: boolean;
+  canRetryDifferently: boolean;
+}
+
+export type FileChangeKind = "create" | "modify" | "delete" | "rename";
+
+export interface CheckpointFile {
+  path: string;
+  changeKind: FileChangeKind;
+  existedBefore: boolean;
+  sizeBefore: number;
+  sizeAfter: number;
+  /** False when the file was too large to record, so it cannot be restored. */
+  reversible: boolean;
+  skipReason: string | null;
+}
+
+export interface Checkpoint {
+  id: string;
+  projectId: string;
+  runId: string | null;
+  label: string;
+  status: "applied" | "undone" | "partial";
+  reversible: boolean;
+  note: string | null;
+  createdAt: string;
+  undoneAt: string | null;
+  files: CheckpointFile[];
+}

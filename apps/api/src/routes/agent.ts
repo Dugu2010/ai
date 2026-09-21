@@ -5,359 +5,74 @@ import {
   createConversation,
   listMessages,
   addMessage,
-  getUserSettings,
 } from "@dai/db";
-import { NIMClient, type ToolDefinition, type ChatMessage, type ToolCall } from "@dai/nim";
+import { createAgentRun, insertActivityEvent, updateAgentRun } from "@dai/db";
+import { NIMClient, type ChatMessage } from "@dai/nim";
 import { requireAuth, getAuthUser } from "../lib/auth.js";
 import { resolveNimConfig } from "../lib/nim-config.js";
-import { validatePath, validateCommandOptions, MAX_TIMEOUT_MS } from "../lib/validation.js";
+import { validatePath } from "../lib/validation.js";
 import {
   acquireWorkspace,
   isRuntimeConfigured,
   releaseWorkspace,
   runtimeDefaultPort,
 } from "../lib/runtime.js";
-import type { Workspace } from "@dai/modal";
+import { DEFAULT_BUDGET_LIMITS, RuntimeBudget } from "../lib/runtime-policy.js";
+import { LoopDetector } from "../lib/loop-detector.js";
+import { createActivityEmitter, type ActivityEvent } from "../lib/activity.js";
+import { runAgentLoop } from "../lib/agent-loop.js";
+import { isCancelled, registerCancellation, unregisterCancellation } from "../lib/cancellations.js";
 
 const router = Router();
 router.use(requireAuth);
 
-const TOOLS: ToolDefinition[] = [
-  {
-    type: "function",
-    function: {
-      name: "list_files",
-      description: "List files and directories in a path",
-      parameters: {
-        type: "object",
-        properties: { path: { type: "string", description: "Path to list (must start with /workspace)" } },
-        required: ["path"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "read_file",
-      description: "Read file contents",
-      parameters: {
-        type: "object",
-        properties: { path: { type: "string", description: "File path (must start with /workspace)" } },
-        required: ["path"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "write_file",
-      description: "Write content to a file",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string", description: "File path (must start with /workspace)" },
-          content: { type: "string", description: "File content" },
-        },
-        required: ["path", "content"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "edit_file",
-      description: "Replace an exact string in a file with new content. Prefer this over rewriting whole files.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string", description: "File path (must start with /workspace)" },
-          oldString: { type: "string", description: "Exact text to replace (must appear exactly once ideally)" },
-          newString: { type: "string", description: "Replacement text" },
-        },
-        required: ["path", "oldString", "newString"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "delete_file",
-      description: "Delete a file",
-      parameters: {
-        type: "object",
-        properties: { path: { type: "string", description: "File path (must start with /workspace)" } },
-        required: ["path"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "rename_file",
-      description: "Rename or move a file or directory",
-      parameters: {
-        type: "object",
-        properties: {
-          oldPath: { type: "string", description: "Current file path" },
-          newPath: { type: "string", description: "New file path" },
-        },
-        required: ["oldPath", "newPath"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "run_command",
-      description: "Execute a shell command in the project sandbox",
-      parameters: {
-        type: "object",
-        properties: {
-          command: { type: "string", description: "Command to run" },
-          cwd: { type: "string", description: "Working directory (default: /workspace)" },
-          timeoutMs: { type: "number", description: "Timeout in milliseconds (max: 300000)" },
-        },
-        required: ["command"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "search_files",
-      description: "Search for files by name pattern",
-      parameters: {
-        type: "object",
-        properties: {
-          pattern: { type: "string", description: "File name pattern (glob)" },
-          dir: { type: "string", description: "Directory to search (default: /workspace)" },
-        },
-        required: ["pattern"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "search_content",
-      description: "Search for text content in files",
-      parameters: {
-        type: "object",
-        properties: {
-          pattern: { type: "string", description: "Text pattern to find" },
-          dir: { type: "string", description: "Directory to search (default: /workspace)" },
-        },
-        required: ["pattern"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "start_dev_server",
-      description: "Start (or restart) a development server and expose a public preview URL",
-      parameters: {
-        type: "object",
-        properties: {
-          command: { type: "string", description: "Command to start server, e.g. npm run dev" },
-          port: { type: "number", description: "Port the server listens on" },
-        },
-        required: ["command", "port"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "stop_dev_server",
-      description: "Stop the running development server",
-      parameters: {
-        type: "object",
-        properties: { port: { type: "number", description: "Port the server listens on (default: the configured preview port)" } },
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "git_status",
-      description: "Inspect git branch, staged, modified and untracked files",
-      parameters: {
-        type: "object",
-        properties: { cwd: { type: "string", description: "Repository directory (default: /workspace)" } },
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "git_diff",
-      description: "Show staged and unstaged git changes",
-      parameters: {
-        type: "object",
-        properties: { cwd: { type: "string", description: "Repository directory (default: /workspace)" } },
-      },
-    },
-  },
-];
-
-const MAX_ITERATIONS = 12;
-
-/** Port DAI serves previews on when a tool call does not name one. */
-const DEFAULT_PREVIEW_PORT = runtimeDefaultPort();
-
-function toWireToolCalls(calls: ToolCall[]) {
-  return calls.map((c) => ({
-    id: c.id,
-    type: "function" as const,
-    function: { name: c.name, arguments: JSON.stringify(c.arguments ?? {}) },
-  }));
-}
-
-async function executeTool(
-  workspace: Workspace | null,
-  name: string,
-  args: Record<string, unknown>
-): Promise<{ result: string; success: boolean }> {
-  if (!workspace) {
-    throw Object.assign(new Error("Sandbox is not available. The project sandbox could not be reached."), { statusCode: 503 });
-  }
-  try {
-    switch (name) {
-      case "list_files": {
-        const v = validatePath(String(args.path ?? "/workspace"));
-        if (!v.valid || !v.normalized) return { result: `Error: ${v.error}`, success: false };
-        const entries = await workspace.listFiles(v.normalized);
-        return { result: JSON.stringify(entries, null, 2), success: true };
-      }
-      case "read_file": {
-        const v = validatePath(String(args.path ?? ""));
-        if (!v.valid || !v.normalized) return { result: `Error: ${v.error}`, success: false };
-        const content = await workspace.readFile(v.normalized);
-        return content === null
-          ? { result: "Error: file not found", success: false }
-          : { result: content, success: true };
-      }
-      case "write_file": {
-        const v = validatePath(String(args.path ?? ""));
-        if (!v.valid || !v.normalized) return { result: `Error: ${v.error}`, success: false };
-        await workspace.writeFile(v.normalized, String(args.content ?? ""));
-        return { result: "File written successfully", success: true };
-      }
-      case "edit_file": {
-        const v = validatePath(String(args.path ?? ""));
-        if (!v.valid || !v.normalized) return { result: `Error: ${v.error}`, success: false };
-        const oldStr = String(args.oldString ?? "");
-        const newStr = String(args.newString ?? "");
-        if (!oldStr) return { result: "Error: oldString is required", success: false };
-        const current = await workspace.readFile(v.normalized);
-        if (current === null) return { result: "Error: file not found", success: false };
-        const first = current.indexOf(oldStr);
-        if (first === -1) return { result: "Error: oldString not found in file", success: false };
-        const second = current.indexOf(oldStr, first + 1);
-        if (second !== -1) {
-          return { result: "Error: oldString matches multiple locations; include more surrounding text", success: false };
-        }
-        await workspace.writeFile(v.normalized, current.slice(0, first) + newStr + current.slice(first + oldStr.length));
-        return { result: "Edit applied successfully", success: true };
-      }
-      case "delete_file": {
-        const v = validatePath(String(args.path ?? ""));
-        if (!v.valid || !v.normalized) return { result: `Error: ${v.error}`, success: false };
-        await workspace.remove(v.normalized);
-        return { result: "File deleted", success: true };
-      }
-      case "rename_file": {
-        const oldV = validatePath(String(args.oldPath ?? ""));
-        const newV = validatePath(String(args.newPath ?? ""));
-        if (!oldV.valid || !oldV.normalized) return { result: `Error: ${oldV.error}`, success: false };
-        if (!newV.valid || !newV.normalized) return { result: `Error: ${newV.error}`, success: false };
-        await workspace.rename(oldV.normalized, newV.normalized);
-        return { result: "File renamed", success: true };
-      }
-      case "run_command": {
-        const command = String(args.command ?? "");
-        const validation = validateCommandOptions({
-          command,
-          cwd: args.cwd ? String(args.cwd) : undefined,
-          timeoutMs: args.timeoutMs ? Number(args.timeoutMs) : undefined,
-        });
-        if (!validation.valid) return { result: `Error: ${validation.error}`, success: false };
-        const cwdV = validatePath(String(args.cwd ?? "/workspace"));
-        if (!cwdV.valid || !cwdV.normalized) return { result: `Error: ${cwdV.error}`, success: false };
-        const timeout = Math.min(Number(args.timeoutMs) || MAX_TIMEOUT_MS, MAX_TIMEOUT_MS);
-        const r = await workspace.exec(command, { cwd: cwdV.normalized, timeoutMs: timeout });
-        const out = [
-          r.stdout ? `stdout:\n${r.stdout}` : null,
-          r.stderr ? `stderr:\n${r.stderr}` : null,
-          r.timedOut ? "timed out" : null,
-          `exit code: ${r.exitCode}`,
-        ]
-          .filter(Boolean)
-          .join("\n");
-        return { result: out || "(no output)", success: r.exitCode === 0 };
-      }
-      case "search_files": {
-        const dirV = validatePath(String(args.dir ?? "/workspace"));
-        if (!dirV.valid || !dirV.normalized) return { result: `Error: ${dirV.error}`, success: false };
-        const files = await workspace.searchFiles(dirV.normalized, String(args.pattern ?? "*"));
-        return { result: files.length ? files.join("\n") : "No files matched", success: true };
-      }
-      case "search_content": {
-        const dirV = validatePath(String(args.dir ?? "/workspace"));
-        if (!dirV.valid || !dirV.normalized) return { result: `Error: ${dirV.error}`, success: false };
-        const matches = await workspace.searchContent(dirV.normalized, String(args.pattern ?? ""));
-        return {
-          result: matches.length ? JSON.stringify(matches, null, 2) : "No content matched",
-          success: true,
-        };
-      }
-      case "start_dev_server": {
-        const command = String(args.command ?? "");
-        const port = Number(args.port ?? DEFAULT_PREVIEW_PORT);
-        if (!command || !port || port < 1 || port > 65535) {
-          return { result: "Error: command and valid port required", success: false };
-        }
-        const cwdV = validatePath(String(args.cwd ?? "/workspace"));
-        if (!cwdV.valid || !cwdV.normalized) return { result: `Error: ${cwdV.error}`, success: false };
-        const server = await workspace.startDevServer({ command, port, cwd: cwdV.normalized });
-        const url = await workspace.getPreviewUrl(port);
-        return {
-          result: server.ready
-            ? `Dev server is up at ${url.url ?? "(no tunnel url)"}`
-            : `Dev server process started${url.url ? ` at ${url.url}` : ""} but nothing is listening on port ${port} yet — it may still be booting.`,
-          success: true,
-        };
-      }
-      case "stop_dev_server": {
-        const port = Number(args.port ?? DEFAULT_PREVIEW_PORT);
-        await workspace.stopDevServer(port);
-        return { result: `Dev server stopped on port ${port}`, success: true };
-      }
-      case "git_status": {
-        const cwdV = validatePath(String(args.cwd ?? "/workspace"));
-        if (!cwdV.valid || !cwdV.normalized) return { result: `Error: ${cwdV.error}`, success: false };
-        return { result: JSON.stringify(await workspace.getGitStatus(cwdV.normalized), null, 2), success: true };
-      }
-      case "git_diff": {
-        const cwdV = validatePath(String(args.cwd ?? "/workspace"));
-        if (!cwdV.valid || !cwdV.normalized) return { result: `Error: ${cwdV.error}`, success: false };
-        return { result: JSON.stringify(await workspace.getGitDiff(cwdV.normalized), null, 2), success: true };
-      }
-      default:
-        return { result: `Error: unknown tool ${name}`, success: false };
-    }
-  } catch (error: any) {
-    return { result: `Error: ${error.message}`, success: false };
-  }
-}
+const SYSTEM_PROMPT = [
+  "You are DAI, an expert coding agent working inside a project sandbox.",
+  "Project files live under /workspace. Use the provided tools to inspect, create, edit, and run code.",
+  "Prefer edit_file for small changes and write_file for new files.",
+  "Run tests or a build to verify a change before claiming it works.",
+  "Never describe reasoning you did not perform, and never claim a command passed without running it.",
+].join(" ");
 
 function writeSSE(res: Response, event: string, data: Record<string, unknown>): void {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
+/**
+ * Bridges the loop's activity feed onto the wire.
+ *
+ * The legacy `assistant_delta` / `tool_call` / `tool_result` frames are still
+ * emitted so an older client keeps working, while `activity` frames carry the
+ * high-level timeline the redesigned UI renders.
+ */
+function frameForLegacyStream(event: ActivityEvent): Array<[string, Record<string, unknown>]> {
+  const id = `cmd-${event.seq}`;
+  switch (event.type) {
+    case "agent.command.started":
+    case "agent.test.started":
+      return [
+        [
+          "tool_call",
+          { id, name: typeof event.detail.command === "string" ? event.detail.command : "command", args: {} },
+        ],
+      ];
+    case "agent.command.completed":
+    case "agent.test.completed":
+      return [
+        [
+          "tool_result",
+          { id, status: event.state === "diagnosing" ? "error" : "success", preview: event.title },
+        ],
+      ];
+    default:
+      return [];
+  }
+}
+
 router.post("/:id/agent", async (req: Request, res: Response) => {
-  let workspace: Workspace | null = null;
+  let workspace: Awaited<ReturnType<typeof acquireWorkspace>>["workspace"] | null = null;
+  let runId: string | null = null;
+
   try {
     const user = getAuthUser(req);
     const project = await getProjectByUser(req.params.id!, user.userId);
@@ -372,30 +87,21 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       return;
     }
 
-    // Attach to the project's runtime BEFORE flushing the SSE headers, so an
-    // unavailable runtime can be reported as structured 503 JSON instead of a
-    // half-open stream. One Sandbox serves the whole run; tools never
-    // provision per command.
-    let runtimeReady = false;
-    if (isRuntimeConfigured()) {
-      try {
-        const acquired = await acquireWorkspace(project.id);
-        workspace = acquired.workspace;
-        runtimeReady = true;
-      } catch (error: any) {
-        // A project with no sandbox id yet that cannot create one is a hard
-        // failure; report it rather than silently answering without tools.
-        console.error("[agent] runtime acquisition failed:", error?.message ?? error);
-        res
-          .status(error?.statusCode ?? 503)
-          .json({ error: error?.message ?? "Sandbox is not available. Please try again.", status: "error" });
-        return;
-      }
-    } else {
+    // Attach compute BEFORE the SSE headers, so an unavailable runtime is a
+    // structured 503 rather than a half-open stream.
+    if (!isRuntimeConfigured()) {
       res.status(503).json({
         error: "No execution runtime is configured. Set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET on the backend.",
         status: "error",
       });
+      return;
+    }
+    try {
+      const acquired = await acquireWorkspace(project.id);
+      workspace = acquired.workspace;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Sandbox is not available. Please try again.";
+      res.status((error as { statusCode?: number }).statusCode ?? 503).json({ error: message, status: "error" });
       return;
     }
 
@@ -417,117 +123,193 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
     }
     const history = await listMessages(convId);
 
-    const systemPrompt = [
-      "You are DAI, an expert coding agent working inside a project sandbox.",
-      "Project files live under /workspace. Use the provided tools to inspect, create, edit, and run code.",
-      "Prefer edit_file for small changes and write_file for new files.",
-      "Always use tools to verify state before claiming success. Be concise and practical.",
-    ].join(" ");
+    const run = await createAgentRun({
+      projectId: project.id,
+      conversationId: convId,
+      userId: user.userId,
+      prompt: message,
+      budget: {},
+      sandboxId: workspace.sandboxId,
+    });
+    runId = run.id;
+
+    const budget = new RuntimeBudget(DEFAULT_BUDGET_LIMITS);
+    const loop = new LoopDetector();
+
+    const emitter = createActivityEmitter({
+      runId: run.id,
+      projectId: project.id,
+      persist: (event) => {
+        void insertActivityEvent(run.id, project.id, event).catch((error: unknown) => {
+          console.error("[agent] activity persist failed:", error instanceof Error ? error.message : error);
+        });
+      },
+      publish: (frame) => {
+        writeSSE(res, "activity", frame as unknown as Record<string, unknown>);
+        for (const [name, payload] of frameForLegacyStream(frame)) writeSSE(res, name, payload);
+      },
+    });
+
+    await addMessage(convId, { role: "user", content: message, projectId: project.id });
 
     const messages: ChatMessage[] = [
-      { role: "system", content: systemPrompt },
+      { role: "system", content: SYSTEM_PROMPT },
       ...history
         .slice(-40)
         .filter((m) => m.role === "user" || m.role === "assistant")
-        // Assistant rows written for a tool-call-only turn persist a null
-        // content; replaying them injects blank turns into the model's context.
+        // Tool-call-only turns persist a null content; replaying them injects
+        // blank turns into the model's context.
         .filter((m) => m.role === "user" || (m.content ?? "").trim() !== "")
         .map((m) => ({ role: m.role as "user" | "assistant", content: m.content || "" })),
       { role: "user", content: message },
     ];
 
-    await addMessage(convId, { role: "user", content: message, projectId: project.id });
-
-    let finalContent: string | null = null;
-    let contentStreamed = false;
-    const allToolCalls: { id: string; name: string; arguments: Record<string, unknown>; success: boolean; result?: string }[] = [];
-
-    for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-      const response = await nim.chat({ messages, tools: runtimeReady ? TOOLS : undefined });
-
-      if (response.content) {
-        finalContent = response.content;
-        contentStreamed = true;
-        writeSSE(res, "assistant_delta", { text: response.content });
-      }
-
-      if (response.toolCalls.length === 0 || !runtimeReady) {
-        break;
-      }
-
-      messages.push({
-        role: "assistant",
-        content: response.content ?? null,
-        tool_calls: toWireToolCalls(response.toolCalls),
-      });
-      await addMessage(convId, {
-        role: "assistant",
-        content: response.content ?? null,
-        projectId: project.id,
-      });
-
-      for (const call of response.toolCalls) {
-        writeSSE(res, "tool_call", { id: call.id, name: call.name, args: call.arguments });
-
-        const { result, success } = await executeTool(workspace, call.name, call.arguments);
-        allToolCalls.push({ id: call.id, name: call.name, arguments: call.arguments, success, result: result.slice(0, 500) });
-
-        writeSSE(res, "tool_result", {
-          id: call.id,
-          status: success ? "success" : "error",
-          preview: result.slice(0, 200),
-        });
-
-        // Feed the tool result back to the model so it can plan the next step.
-        messages.push({ role: "tool", content: result.slice(0, 8000), tool_call_id: call.id, name: call.name });
-
+    registerCancellation(run.id);
+    const result = await runAgentLoop({
+      projectId: project.id,
+      runId: run.id,
+      prompt: message,
+      workspace,
+      nim,
+      messages,
+      emit: emitter.emit,
+      budget,
+      loop,
+      previewPort: runtimeDefaultPort(),
+      aborted: () => isCancelled(run.id),
+      recordToolCall: async (entry) => {
         await addMessage(convId, {
           role: "tool",
-          content: result.slice(0, 8000),
+          content: entry.result,
           projectId: project.id,
-          toolName: call.name,
-          toolArgs: call.arguments,
-          toolResult: { success, result: result.slice(0, 8000) },
+          toolName: entry.name,
+          toolArgs: entry.args,
+          toolResult: { success: entry.success, result: entry.result },
         });
-      }
-    }
+      },
+    });
 
-    if (!finalContent && allToolCalls.length > 0) {
-      finalContent = `Completed ${allToolCalls.length} tool operation${allToolCalls.length === 1 ? "" : "s"}.`;
-    }
-
-    // A tool-only turn yields no prose from the model, so stream the summary:
-    // without it the chat pane ends the run with no assistant message at all.
-    if (finalContent && !contentStreamed) {
-      writeSSE(res, "assistant_delta", { text: finalContent });
+    if (result.contentStreamed && result.content) {
+      writeSSE(res, "assistant_delta", { text: result.content });
     }
 
     const finalMessage = await addMessage(convId, {
       role: "assistant",
-      content: finalContent || "(no content returned)",
+      content: result.content || "(no content returned)",
       projectId: project.id,
     });
 
-    writeSSE(res, "done", { conversationId: convId, messageId: finalMessage.id });
+    await updateAgentRun(run.id, {
+      state: result.state,
+      outcome: result.outcome,
+      stopReason: result.stopReason ?? undefined,
+      iterations: result.iterations,
+      toolCalls: result.toolCalls,
+      execCalls: result.execCalls,
+      runtimeActivations: result.runtimeActivations,
+      runtimeMs: result.runtimeMs,
+      filesChanged: result.filesChanged,
+      summary: result.content?.slice(0, 2000) ?? undefined,
+      finishedAt: new Date().toISOString(),
+    });
+
+    if (result.checkpointId) {
+      emitter.emit("agent.undo.created", "Undo is available for this run", {
+        checkpointId: result.checkpointId,
+      });
+    }
+    emitter.emit(
+      result.outcome === "completed" ? "agent.completed" : "agent.error",
+      result.outcome === "completed" ? "Task complete" : (result.stopReason ?? "Task stopped"),
+      { outcome: result.outcome, reason: result.stopReason ?? undefined },
+      result.state
+    );
+
+    writeSSE(res, "done", {
+      runId: run.id,
+      conversationId: convId,
+      messageId: finalMessage.id,
+      outcome: result.outcome,
+      stopReason: result.stopReason,
+      checkpointId: result.checkpointId,
+    });
     res.end();
-  } catch (error: any) {
-    console.error("[agent]", error.message);
+  } catch (error) {
+    console.error("[agent]", error instanceof Error ? error.message : error);
     if (!res.headersSent) {
-      const status = error.statusCode ?? 500;
-      res.status(status).json({ error: error.message || "Agent request failed", status: "error" });
+      const status = (error as { statusCode?: number }).statusCode ?? 500;
+      res
+        .status(status)
+        .json({ error: error instanceof Error ? error.message : "Agent request failed", status: "error" });
       return;
     }
     try {
-      writeSSE(res, "error", { message: error.message || "Agent request failed" });
-      writeSSE(res, "done", { messageId: "error" });
+      writeSSE(res, "error", { message: error instanceof Error ? error.message : "Agent request failed" });
+      writeSSE(res, "done", { outcome: "failed", stopReason: null });
       res.end();
     } catch {
-      // Response already broken.
+      // The response is already broken.
     }
   } finally {
-    // Release the local handle only. The Sandbox stays up for the next request
-    // and is reclaimed by Modal's idle timeout once the developer stops working.
     if (workspace) releaseWorkspace(workspace);
+    if (runId) unregisterCancellation(runId);
+  }
+});
+
+/**
+ * Stop a running task. The loop checks this flag between iterations, so a
+ * stopped run ends cleanly and its checkpoint remains available for undo.
+ */
+router.post("/:id/agent/stop", async (req: Request, res: Response) => {
+  try {
+    const user = getAuthUser(req);
+    const project = await getProjectByUser(req.params.id!, user.userId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const { runId } = req.body ?? {};
+    if (typeof runId !== "string" || !runId) {
+      res.status(400).json({ error: "runId required" });
+      return;
+    }
+    registerCancellation(runId);
+    await updateAgentRun(runId, {
+      state: "paused",
+      outcome: "cancelled",
+      stopReason: "Stopped by you.",
+    });
+    res.json({ success: isCancelled(runId), runId });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : "Unable to stop the run" });
+  }
+});
+
+/** Latest run plus its timeline — what the UI loads on open and on reconnect. */
+router.get("/:id/agent/status", async (req: Request, res: Response) => {
+  try {
+    const user = getAuthUser(req);
+    const project = await getProjectByUser(req.params.id!, user.userId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const { listAgentRuns, listActivityEvents, findLatestAppliedCheckpoint, findNextUndoneCheckpoint } = await import("@dai/db");
+    const runs = await listAgentRuns(project.id, 1);
+    const run = runs[0] ?? null;
+    const events = run ? await listActivityEvents(run.id) : [];
+    const limits = DEFAULT_BUDGET_LIMITS;
+    res.json({
+      run,
+      events,
+      limits,
+      canUndo: Boolean(await findLatestAppliedCheckpoint(project.id)),
+      canRedo: Boolean(await findNextUndoneCheckpoint(project.id)),
+      canContinue: run?.outcome === "paused" || run?.outcome === "budget_exhausted",
+      canRetryDifferently: run?.outcome === "paused",
+    });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : "Unable to read run status" });
   }
 });
 

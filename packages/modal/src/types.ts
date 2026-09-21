@@ -43,12 +43,56 @@ export interface DevServerHandle {
   ready: boolean;
 }
 
+export type BatchReadResult =
+  | { exists: false }
+  | { exists: true; isText: boolean; size: number; content: string | null; binary: string | null }
+  | { error: string };
+
+/** Outcome of applying one recorded path change. */
+export interface MutationResult {
+  path: string;
+  status: "restored" | "deleted" | "conflict" | "error" | "skipped";
+  detail?: string;
+}
+
+/**
+ * One file to write or delete. `content: null` deletes the path. `expectCurrent`
+ * is the exact text the file must hold for the mutation to be allowed.
+ */
+export interface FileMutation {
+  path: string;
+  content: string | null;
+  expectCurrent: string | null;
+}
+
 /** A live, attached runtime bound to one project's persistent workspace. */
 export interface Workspace {
   readonly sandboxId: string;
   exec(command: string, opts?: { cwd?: string; timeoutMs?: number; env?: Record<string, string> }): Promise<ExecResult>;
   readFile(path: string): Promise<string | null>;
+  /**
+   * Read many files in ONE batched request.
+   *
+   * Used to capture undo pre-images. Reading a pending path one at a time would
+   * cost a Sandbox command each, so the whole set is fetched together. Values are
+   * the file's bytes decoded as UTF-8 when it is text, and `null` when the path
+   * does not exist; `isText` is false for content that will not round-trip.
+   */
+  readFilesBatch(paths: string[]): Promise<Record<string, BatchReadResult>>;
   writeFile(path: string, content: string): Promise<void>;
+  /**
+   * Write or delete many files in ONE batched command.
+   *
+   * This is the main cost lever on this provider: each individual filesystem
+   * call is itself a command inside the Sandbox, so applying a 12-file edit
+   * one-by-one spends 12 runtime commands and can half-apply when the seventh
+   * fails. As one request it costs one.
+   *
+   * Each entry carries the content it expects to find first, so a file someone
+   * else changed is reported as a conflict rather than silently clobbered. Used
+   * both to apply agent edits and to undo them.
+   */
+  applyFileMutations(entries: FileMutation[], opts?: { timeoutMs?: number }): Promise<MutationResult[]>;
   listFiles(path: string): Promise<FileEntry[]>;
   stat(path: string): Promise<{ size: number; isDirectory: boolean } | null>;
   remove(path: string): Promise<void>;

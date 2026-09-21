@@ -16,14 +16,19 @@ import type { Probe as ProbeType, Sandbox } from "modal";
 import { Probe } from "modal";
 import type { ModalRuntimeConfig } from "./config.js";
 import { sandboxName, volumeSubPath } from "./config.js";
+import { READ_BATCH_MARKER, READ_BATCH_SCRIPT } from "./read-batch-script.js";
+import { RESTORE_MARKER, RESTORE_SCRIPT } from "./restore-script.js";
 import { RuntimeOperationError, isFailure, toRuntimeError } from "./errors.js";
 import type { ModalProvider } from "./provider.js";
 import type {
   AcquireOptions,
+  BatchReadResult,
   DevServerHandle,
   ExecResult,
   FileEntry,
   PreviewTarget,
+  FileMutation,
+  MutationResult,
   RuntimeService,
   RuntimeState,
   Workspace,
@@ -184,6 +189,87 @@ export class ModalWorkspace implements Workspace {
     } catch (error) {
       throw toRuntimeError(error, `Unable to remove ${path}`);
     }
+  }
+
+  /** @see Workspace.applyFileMutations */
+  async applyFileMutations(
+    entries: FileMutation[],
+    opts: { timeoutMs?: number } = {}
+  ): Promise<MutationResult[]> {
+    if (entries.length === 0) return [];
+    const payload = Buffer.from(JSON.stringify(entries), "utf8").toString("base64");
+    const result = await this.runArgv(["/usr/bin/python3", "-c", RESTORE_SCRIPT, "dai-restore", payload], {
+      timeoutMs: opts.timeoutMs,
+    });
+    if (result.timedOut) {
+      throw new RuntimeOperationError("Batched file mutation timed out", "timeout");
+    }
+    const markerAt = result.stdout.lastIndexOf(RESTORE_MARKER);
+    if (markerAt === -1) {
+      throw new RuntimeOperationError(
+        `Batched mutation returned no result: ${(result.stderr || result.stdout).slice(0, 300)}`,
+        "rejected"
+      );
+    }
+    try {
+      const parsed = JSON.parse(result.stdout.slice(markerAt + RESTORE_MARKER.length)) as MutationResult[];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+      throw new RuntimeOperationError(
+        `Unable to parse mutation result: ${error instanceof Error ? error.message : String(error)}`,
+        "rejected"
+      );
+    }
+  }
+
+  /** Read many paths in one command; see `Workspace.readFilesBatch`. */
+  async readFilesBatch(paths: string[]): Promise<Record<string, BatchReadResult>> {
+    if (paths.length === 0) return {};
+    const payload = Buffer.from(JSON.stringify(paths), "utf8").toString("base64");
+    const result = await this.runArgv(["/usr/bin/python3", "-c", READ_BATCH_SCRIPT, "dai-read", payload]);
+    if (result.timedOut) {
+      throw new RuntimeOperationError("Batch read timed out", "timeout");
+    }
+    const markerAt = result.stdout.lastIndexOf(READ_BATCH_MARKER);
+    if (markerAt === -1) {
+      throw new RuntimeOperationError(
+        `Batch read returned no result: ${(result.stderr || result.stdout).slice(0, 200)}`,
+        "rejected"
+      );
+    }
+    let decoded: string;
+    try {
+      decoded = Buffer.from(result.stdout.slice(markerAt + READ_BATCH_MARKER.length).trim(), "base64").toString("utf8");
+    } catch (error) {
+      throw new RuntimeOperationError("Batch read returned unreadable data", "rejected");
+    }
+    const raw = JSON.parse(decoded) as Record<string, {
+      exists?: boolean; size?: number; encoding?: string; data?: string; error?: string;
+    }>;
+    const outcomes: Record<string, BatchReadResult> = {};
+    for (const [path, entry] of Object.entries(raw)) {
+      if (entry.error) {
+        outcomes[path] = { error: entry.error };
+        continue;
+      }
+      if (!entry.exists) {
+        outcomes[path] = { exists: false };
+        continue;
+      }
+      const bytes = Buffer.from(entry.data ?? "", "base64");
+      const text = bytes.toString("utf8");
+      // A round-trip check, not a heuristic: if re-encoding the decoded text does
+      // not reproduce the bytes, undo could not restore this file faithfully.
+      const isText = Buffer.from(text, "utf8").equals(bytes);
+      outcomes[path] = {
+        exists: true,
+        isText,
+        size: entry.size ?? bytes.length,
+        content: isText ? text : null,
+        binary: isText ? null : entry.data ?? null,
+      };
+    }
+    return outcomes;
   }
 
   async mkdir(path: string): Promise<void> {

@@ -8,6 +8,7 @@ import agentRoutes from "./routes/agent.js";
 import settingsRoutes from "./routes/settings.js";
 import conversationRoutes from "./routes/conversations.js";
 import workspaceRoutes from "./routes/workspace.js";
+import rollbackRoutes from "./routes/rollback.js";
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "4000", 10);
@@ -88,6 +89,7 @@ app.use("/api/projects", agentRoutes); // POST /api/projects/:id/agent
 app.use("/api/settings", settingsRoutes);
 app.use("/api/conversations", conversationRoutes);
 app.use("/api/workspace", workspaceRoutes);
+app.use("/api/workspace", rollbackRoutes); // undo / redo / checkpoints
 
 // 404 for unknown API paths
 app.use((_req: Request, res: Response) => {
