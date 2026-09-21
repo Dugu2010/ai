@@ -200,17 +200,31 @@ vocabulary now means "no live Sandbox, workspace intact".
 `/docs/guide/sandbox-v2`, `/docs/cli/latest/image`, `/docs/sdk/js/releases`,
 `/pricing`.
 
+## Runtime metrics recorded
+
+`agent_runs` stores, per run: iterations, tool calls, exec calls, runtime
+activations, cumulative runtime milliseconds, files changed, the Sandbox id, the
+effective budget, and start/finish timestamps. `activity_events` carries
+per-event duration and exit status. That covers creation time, active execution
+time and command counts, which is what the budget needs in order to decide
+anything.
+
+Two limits, stated rather than glossed:
+
+- Metrics are **per run**, written by the process driving that run. There is no
+  cross-project spend roll-up and no dashboard.
+- Nothing maps a command to a billing unit. Modal's pricing page was not read in
+  enough detail to claim that, so the code reports wall-clock and counts only,
+  and no cost figure is ever shown to a user.
+
+Preview lifecycle is observable through activity events rather than its own
+table; cleanup outcomes are logged rather than metered.
+
 ## Not implemented
 
-**Aggregate runtime metrics.** The requested provider-aware metrics — Sandbox
-creation time, cumulative active execution time, command counts, preview
-lifecycle, failure and cleanup counters — were not built: there is no store for
-them and nothing consumes them today. What exists is narrower and real: each
-`ExecResult` carries `durationMs` and `timedOut`, per-project runtime state is
-derivable from `projects.runtime_provider` / `sandbox_id` /
-`last_accessed_at`, and failures surface as typed `RuntimeOperationError`
-statuses. Adding a metrics table is a deliberate follow-up, not something this
-document should claim as done.
-
-No billing claim is made either: the pricing page was not read in enough detail
-to map individual commands to billing units, so nothing in the code reports cost.
+- No per-user or global cap on live Sandboxes beyond the pre-existing
+  `sandbox_queue` slot limit. The per-run activation budget is the real lever.
+- No cross-run enforcement: limits reset each run by design, so a project making
+  fifty short runs is not throttled as a whole. Aggregate quotas remain open.
+- `apps/web` still carries dead modules and two backend dependencies
+  (`@dai/db`, `@dai/nim`). Removal is deliberately deferred: see Final audit.
