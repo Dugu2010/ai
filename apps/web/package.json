@@ -6,7 +6,7 @@
     "build": "next build",
     "dev": "next dev",
     "typecheck": "tsc --noEmit",
-    "lint": "next lint"
+    "lint": "eslint ."
   },
   "dependencies": {
     "@dai/db": "workspace:*",

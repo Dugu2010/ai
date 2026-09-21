@@ -2,10 +2,10 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import Editor, { loader } from "@monaco-editor/react";
+import Editor from "@monaco-editor/react";
 import { daiDarkTheme, DAI_DARK_THEME_NAME } from "@/lib/monaco-theme";
 import { isAuthenticated, fetchApi } from "@/lib/api-client";
-import { useToast, showToast } from "@/components/toast";
+import { useToast } from "@/components/toast";
 import { CommandPalette } from "@/components/command-palette";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { useFocusTrap } from "@/lib/use-focus-trap";
@@ -26,8 +26,11 @@ interface ToolActivity {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
+  running: boolean;
   success: boolean;
   result?: string;
+  startedAt: number;
+  durationMs?: number;
 }
 
 interface Message {
@@ -51,8 +54,11 @@ interface Status {
   state: string;
   previewUrl?: string | null;
   isHibernated?: boolean;
+  isArchived?: boolean;
+  devServerRunning?: boolean;
   lastError?: string | null;
   bootupType?: string | null;
+  isUpToDate?: boolean | null;
   modelId?: string;
 }
 
@@ -78,17 +84,6 @@ function modelLabel(id: string): string {
   return MODEL_LABELS[id] ?? id.split("/").pop()?.replace(/[-_]/g, " ") ?? id;
 }
 
-function formatTime(iso?: string): string {
-  if (!iso) return "Just now";
-  const diff = Date.now() - new Date(iso).getTime();
-  const sec = Math.floor(diff / 1000);
-  if (sec < 60) return `${sec}s`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m`;
-  const hr = Math.floor(min / 60);
-  return `${hr}h`;
-}
-
 function relativeTime(iso?: string): string {
   if (!iso) return "";
   const diff = Date.now() - new Date(iso).getTime();
@@ -96,6 +91,33 @@ function relativeTime(iso?: string): string {
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
   return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+function formatDuration(ms?: number): string {
+  if (ms === undefined) return "";
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** Render an activity line as `name("primary arg"[, secondary])`, spec style. */
+function activitySummary(activity: ToolActivity): string {
+  const args = activity.arguments ?? {};
+  const parts: string[] = [];
+  const primary = args.path ?? args.command ?? args.pattern ?? args.oldPath;
+  if (typeof primary === "string" && primary) {
+    parts.push(`"${primary.slice(0, 60)}"`);
+  }
+  if (activity.name === "write_file") {
+    const content = args.content;
+    if (typeof content === "string") {
+      const lines = content.split("\n").length;
+      parts.push(`${lines} line${lines === 1 ? "" : "s"}`);
+    }
+  }
+  if (activity.name === "start_dev_server" && typeof args.port === "number") {
+    parts.length = 0;
+    parts.push(`port ${args.port}`);
+  }
+  return `${activity.name}(${parts.join(", ")})`;
 }
 
 const LANGUAGE_BY_EXT: Record<string, string> = {
@@ -129,6 +151,28 @@ function languageForPath(path?: string | null): string | undefined {
   return LANGUAGE_BY_EXT[ext];
 }
 
+/** Read a wire field as a string without trusting the payload's shape. */
+function field(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof Error && err.message ? err.message : fallback;
+}
+
+function isAbort(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
+}
+
+interface StoredMessage {
+  id: string;
+  role: string;
+  content: string | null;
+  toolName?: string;
+  toolArgs?: Record<string, unknown>;
+  toolResult?: { success?: boolean; result?: string };
+}
+
 async function* parseSSE(stream: ReadableStream<Uint8Array>): AsyncGenerator<SSEEvent> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -145,7 +189,13 @@ async function* parseSSE(stream: ReadableStream<Uint8Array>): AsyncGenerator<SSE
       for (const line of lines) {
         if (line === "") {
           if (event || data) {
-            yield { event, data: JSON.parse(data) };
+            // A single malformed frame must not abort the rest of the chat run.
+            try {
+              const parsed = JSON.parse(data) as unknown;
+              yield { event, data: typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {} };
+            } catch {
+              // Skip it.
+            }
             event = "";
             data = "";
           }
@@ -165,6 +215,9 @@ async function* parseSSE(stream: ReadableStream<Uint8Array>): AsyncGenerator<SSE
 // Sandbox status pill — single source of truth
 // ---------------------------------------------------------------------------
 
+// Sandbox status pill — single source of truth, one dot.
+// States mirror GET /api/workspace/:id/status `state`, which is derived from
+// listRunning() rather than a metadata lookup, so "Running" means the VM is up.
 function SandboxPill({ status }: { status: Status | null }) {
   let label = "Idle";
   let color = "var(--text-muted)";
@@ -181,6 +234,14 @@ function SandboxPill({ status }: { status: Status | null }) {
     label = "Running";
     color = "var(--success)";
     bg = "color-mix(in srgb, var(--success) 12%, transparent)";
+  } else if (status?.state === "hibernated") {
+    label = "Paused";
+    color = "var(--warning)";
+    bg = "color-mix(in srgb, var(--warning) 12%, transparent)";
+  } else if (status?.state === "archived") {
+    label = "Archived";
+    color = "var(--warning)";
+    bg = "color-mix(in srgb, var(--warning) 12%, transparent)";
   } else if (status?.state === "unknown" || status?.state === "error") {
     label = "Error";
     color = "var(--danger)";
@@ -194,16 +255,30 @@ function SandboxPill({ status }: { status: Status | null }) {
   );
 }
 
+function ActivityMarker({ activity }: { activity: ToolActivity }) {
+  if (activity.running) {
+    return (
+      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 animate-pulse" style={{ background: "var(--accent)" }} />
+    );
+  }
+  return (
+    <span
+      className="text-xs flex-shrink-0 w-3 text-center"
+      style={{ color: activity.success ? "var(--success)" : "var(--danger)" }}
+      aria-label={activity.success ? "succeeded" : "failed"}
+    >
+      {activity.success ? "✓" : "✗"}
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Activity feed entry
 // ---------------------------------------------------------------------------
 
 function ActivityEntry({ activity }: { activity: ToolActivity }) {
   const [expanded, setExpanded] = useState(false);
-  const argsSummary = Object.entries(activity.arguments ?? {})
-    .slice(0, 2)
-    .map(([, v]) => String(v).slice(0, 48))
-    .join(" · ");
+  const duration = formatDuration(activity.durationMs);
   return (
     <div className={`command-output ${expanded ? "expanded" : ""}`}>
       <button
@@ -213,29 +288,83 @@ function ActivityEntry({ activity }: { activity: ToolActivity }) {
         style={{ minHeight: 44 }}
       >
         <span className="flex items-center gap-2 min-w-0">
-          <span
-            className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-            style={{ background: activity.success ? "var(--success)" : "var(--danger)" }}
-          />
-          <span className="font-mono text-xs flex-shrink-0" style={{ color: "var(--text-secondary)" }}>
-            {activity.name}
+          <ActivityMarker activity={activity} />
+          <span className="font-mono text-xs truncate" style={{ color: "var(--text-secondary)" }}>
+            <span aria-hidden="true">{"→ "}</span>
+            {activitySummary(activity)}
           </span>
-          {argsSummary && (
-            <span className="text-xs truncate" style={{ color: "var(--text-muted)" }}>
-              {argsSummary}
-            </span>
-          )}
         </span>
-        <span className="text-xs flex-shrink-0" style={{ color: "var(--text-muted)" }}>
-          {expanded ? "Hide" : "Show"}
+        <span className="flex items-center gap-2 text-xs flex-shrink-0" style={{ color: "var(--text-muted)" }}>
+          {!activity.running && duration && <span>{duration}</span>}
+          <span>{expanded ? "Hide" : "Show"}</span>
         </span>
       </button>
       {activity.result && (
-        <pre style={{ borderTop: "1px solid var(--border-subtle)", maxHeight: expanded ? "200px" : "96px", overflow: "auto" }}>
+        <pre style={{ borderTop: "1px solid var(--border-subtle)" }}>
+          {!activity.success && <span style={{ color: "var(--danger)" }}>failed{"\n"}</span>}
           {activity.result}
         </pre>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Files panel — shared by the desktop sidebar and the mobile drawer
+// ---------------------------------------------------------------------------
+
+function FilesPanel({
+  files,
+  loading,
+  sandboxRunning,
+  selectedFile,
+  onSelect,
+}: {
+  files: FileEntry[];
+  loading: boolean;
+  sandboxRunning: boolean;
+  selectedFile: string | null;
+  onSelect: (path: string) => void;
+}) {
+  if (loading || (files.length === 0 && !sandboxRunning)) {
+    return (
+      <div className="space-y-2">
+        <Skeleton style={{ height: 14 }} />
+        <Skeleton style={{ height: 14, width: "80%" }} />
+        <Skeleton style={{ height: 14, width: "65%" }} />
+        <Skeleton style={{ height: 14, width: "90%" }} />
+        <p className="text-xs pt-2" style={{ color: "var(--text-muted)" }}>
+          Provisioning sandbox…
+        </p>
+      </div>
+    );
+  }
+  if (files.length === 0) {
+    return (
+      <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+        Empty workspace
+      </p>
+    );
+  }
+  return (
+    <ul className="space-y-1">
+      {files.map((f) => (
+        <li key={f.path}>
+          <button
+            onClick={() => onSelect(f.path)}
+            aria-current={selectedFile === f.path ? "true" : undefined}
+            className={`flex items-center gap-2 text-left w-full px-2 py-1.5 min-h-[44px] rounded text-sm transition-colors ${
+              selectedFile === f.path ? "bg-accent-primary" : "hover:bg-secondary"
+            }`}
+          >
+            <span className="font-mono text-xs truncate" style={{ color: "var(--text-secondary)" }}>
+              {f.kind === "directory" ? "▸ " : "  "}
+              {f.name}
+            </span>
+          </button>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -260,37 +389,39 @@ export default function ProjectPage() {
   const [status, setStatus] = useState<Status | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [failedMessage, setFailedMessage] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [fetchingFiles, setFetchingFiles] = useState(false);
   const [showPreview, setShowPreview] = useState(true);
+  const [startingDev, setStartingDev] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
   const [isNarrowViewport, setIsNarrowViewport] = useState(false);
-  const [isUpToDate, setIsUpToDate] = useState<boolean | null>(null);
-  const [restarting, setRestarting] = useState(false);
-  const [skeletonLoading, setSkeletonLoading] = useState(true);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const activityEndRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const drawerRef = useRef<HTMLElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Marks the assistant message the current SSE run is streaming into, so
+  // deltas never merge into an earlier turn's bubble.
+  const streamingMessageIdRef = useRef<string | null>(null);
   useFocusTrap(drawerRef, showSidebar, () => setShowSidebar(false));
 
   const fetchProject = useCallback(async () => {
     try {
       const res = await fetchApi(`/api/projects/${projectId}`);
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error((data as any).error || `Failed to load project (${res.status})`);
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || `Failed to load project (${res.status})`);
       }
-      const data = await res.json();
+      const data = (await res.json()) as Partial<Project>;
       setProject(data as Project);
-      if ((data as any).previewUrl) setPreviewUrl((data as any).previewUrl);
+      if (data.previewUrl) setPreviewUrl(data.previewUrl);
       setError(null);
-    } catch (err: any) {
-      setError(err.message || "Failed to load project");
+    } catch (err) {
+      setError(errorMessage(err, "Failed to load project"));
     } finally {
       setLoading(false);
-      setSkeletonLoading(false);
     }
   }, [projectId]);
 
@@ -298,11 +429,12 @@ export default function ProjectPage() {
     try {
       const res = await fetchApi(`/api/workspace/${projectId}/status`);
       if (!res.ok) return;
-      const data = await res.json();
-      setStatus(data as Status);
-      if ((data as any).previewUrl) setPreviewUrl((data as any).previewUrl);
-      if (data.isUpToDate !== undefined) setIsUpToDate(data.isUpToDate);
-    } catch {}
+      const data = (await res.json()) as Status;
+      setStatus(data);
+      if (data.previewUrl) setPreviewUrl(data.previewUrl);
+    } catch {
+      // Status is polled opportunistically; a failed read keeps the last value.
+    }
   }, [projectId]);
 
   const fetchFiles = useCallback(async (path = "/workspace") => {
@@ -333,29 +465,51 @@ export default function ProjectPage() {
     try {
       const res = await fetchApi(`/api/conversations/${projectId}`);
       if (!res.ok) return;
-      const conv = await res.json();
+      const conv = (await res.json()) as { id?: string } | null;
       if (!conv?.id) return;
       const msgRes = await fetchApi(`/api/conversations/${conv.id}/messages`);
       if (!msgRes.ok) return;
-      const msgs = await msgRes.json();
-      if (Array.isArray(msgs)) {
-        setMessages(
-          msgs
-            .filter((m: any) => m.role === "user" || m.role === "assistant")
-            .map((m: any) => ({ id: m.id, role: m.role, content: m.content || "" }))
-        );
-      }
+      const msgs = (await msgRes.json()) as StoredMessage[];
+      if (!Array.isArray(msgs)) return;
+      setMessages(
+        msgs
+          .filter((m) => m.role === "user" || m.role === "assistant")
+          .map((m) => ({
+            id: m.id,
+            role: m.role as "user" | "assistant",
+            content: m.content ?? "",
+          }))
+      );
+      // The backend persists tool rows alongside the chat, so replay the
+      // completed ones — otherwise reloading the page empties the activity pane.
+      setActivities(
+        msgs
+          .filter((m) => m.role === "tool" && m.toolName)
+          .map((m) => ({
+            id: `hist-${m.id}`,
+            name: m.toolName as string,
+            arguments: m.toolArgs ?? {},
+            running: false,
+            success: m.toolResult?.success ?? true,
+            result: m.toolResult?.result,
+            startedAt: 0,
+          }))
+      );
     } catch {
       // History load failure is non-fatal.
     }
   }, [projectId]);
 
-  const sendMessage = useCallback(async () => {
-    if (!input.trim() || sending) return;
-    const userMessage: Message = { id: Date.now().toString(), role: "user", content: input.trim() };
+  const sendMessage = useCallback(async (override?: string) => {
+    const text = (override ?? input).trim();
+    if (!text || sending) return;
+    const userMessage: Message = { id: `user-${Date.now()}`, role: "user", content: text };
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setSending(true);
+    setError(null);
+    setFailedMessage(null);
+    streamingMessageIdRef.current = null;
 
     // Cancel any previous SSE connection.
     if (abortRef.current) abortRef.current.abort();
@@ -369,49 +523,69 @@ export default function ProjectPage() {
         signal: controller.signal,
       });
 
-      if (!res.ok || !res.body) {
-        throw new Error(`Agent request failed (${res.status})`);
+      if (!res.ok) {
+        // The backend answers an unavailable sandbox with structured 503 JSON
+        // before any SSE headers, so surface its `error` rather than the status.
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error || `Agent request failed (${res.status})`);
+      }
+      if (!res.body) {
+        throw new Error("The agent returned no stream.");
       }
 
-      for await (const event of parseSSE(res.body) as any) {
+      for await (const event of parseSSE(res.body)) {
         if (event.event === "tool_call") {
+          const rawArgs = event.data.args;
           setActivities((prev) => [
             ...prev,
             {
-              id: String(event.data.id),
-              name: String(event.data.name),
-              arguments: (event.data.args ?? {}) as Record<string, unknown>,
+              id: field(event.data.id),
+              name: field(event.data.name),
+              arguments:
+                typeof rawArgs === "object" && rawArgs !== null ? (rawArgs as Record<string, unknown>) : {},
+              running: true,
               success: false,
+              startedAt: Date.now(),
             },
           ]);
         } else if (event.event === "tool_result") {
+          const id = field(event.data.id);
+          const statusValue = field(event.data.status);
+          const preview = field(event.data.preview);
           setActivities((prev) =>
             prev.map((a: ToolActivity) =>
-              a.id === String(event.data.id)
-                ? { ...a, success: String(event.data.status) === "success", result: String(event.data.preview ?? "") }
+              a.id === id
+                ? {
+                    ...a,
+                    running: false,
+                    success: statusValue === "success",
+                    result: preview,
+                    durationMs: Date.now() - a.startedAt,
+                  }
                 : a
             )
           );
         } else if (event.event === "assistant_delta") {
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last && last.role === "assistant") {
-              return prev.map((m) => (m.id === last.id ? { ...m, content: m.content + (event.data.text ?? "") } : m));
-            }
-            const id = "stream-" + Date.now();
-            return [...prev, { id, role: "assistant" as const, content: (event.data.text ?? "") }];
-          });
+          const chunk = field(event.data.text);
+          if (!chunk) continue;
+          const activeId = streamingMessageIdRef.current;
+          if (activeId) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === activeId ? { ...m, content: m.content + chunk } : m))
+            );
+          } else {
+            const id = `assistant-${Date.now()}`;
+            streamingMessageIdRef.current = id;
+            setMessages((prev) => [...prev, { id, role: "assistant" as const, content: chunk }]);
+          }
         } else if (event.event === "error") {
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last && last.role === "assistant") {
-              return prev.map((m) =>
-                m.id === last.id ? { ...m, content: m.content + "\n[Error: " + (event.data.message ?? "unknown") + "]" } : m
-              );
-            }
-            return prev;
-          });
-          showToast(String(event.data.message ?? "Agent error"), "error");
+          const message = field(event.data.message, "Agent error");
+          setError(message);
+          setFailedMessage(userMessage.content);
+          setActivities((prev) =>
+            prev.map((a) => (a.running ? { ...a, running: false, success: false, durationMs: Date.now() - a.startedAt } : a))
+          );
+          showToast(message, "error");
         } else if (event.event === "done") {
           break;
         }
@@ -420,21 +594,17 @@ export default function ProjectPage() {
       await fetchProject();
       await fetchStatus();
       await fetchFiles();
-    } catch (err: any) {
-      if (err.name === "AbortError") return;
-      setError(err.message || "Failed to send message");
-      setMessages((prev) => {
-        const last = prev[prev.length - 1];
-        if (last && last.role === "assistant") {
-          return prev.map((m) =>
-            m.id === last.id ? { ...m, content: m.content + "\n[Error: " + err.message + "]" } : m
-          );
-        }
-        return [...prev, { id: "err-" + Date.now(), role: "assistant", content: "Error: " + err.message }];
-      });
+    } catch (err) {
+      if (isAbort(err)) return;
+      setError(errorMessage(err, "Failed to send message"));
+      setFailedMessage(userMessage.content);
+      setActivities((prev) =>
+        prev.map((a) => (a.running ? { ...a, running: false, success: false, durationMs: Date.now() - a.startedAt } : a))
+      );
     } finally {
       setSending(false);
       abortRef.current = null;
+      streamingMessageIdRef.current = null;
     }
   }, [projectId, input, sending, fetchProject, fetchStatus, fetchFiles, showToast]);
 
@@ -449,18 +619,47 @@ export default function ProjectPage() {
         await fetchFiles();
         showToast("File saved", "success");
       } else {
-        const data = await res.json().catch(() => ({}));
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
         showToast(data.error || "Failed to save", "error");
       }
-    } catch (err: any) {
-      showToast(err.message || "Failed to save", "error");
+    } catch (err) {
+      showToast(errorMessage(err, "Failed to save"), "error");
     }
   }, [projectId, selectedFile, fileContent, fetchFiles, showToast]);
 
   const handleRetry = () => {
     setError(null);
+    if (failedMessage) {
+      const message = failedMessage;
+      setFailedMessage(null);
+      void sendMessage(message);
+      return;
+    }
     fetchProject();
   };
+
+  const startDevServer = useCallback(async () => {
+    setStartingDev(true);
+    try {
+      const res = await fetchApi(`/api/workspace/${projectId}/preview`, {
+        method: "POST",
+        body: JSON.stringify({ command: "npm run dev", port: 3000 }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: string; url?: string; portUp?: boolean };
+      if (!res.ok) {
+        showToast(data.error || "Failed to start the dev server", "error");
+        return;
+      }
+      if (data.url) setPreviewUrl(data.url);
+      setShowPreview(true);
+      await fetchStatus();
+      showToast(data.portUp ? "Dev server ready" : "Dev server starting", "success");
+    } catch (err) {
+      showToast(errorMessage(err, "Failed to start the dev server"), "error");
+    } finally {
+      setStartingDev(false);
+    }
+  }, [projectId, fetchStatus, showToast]);
 
   useEffect(() => {
     fetchProject();
@@ -482,6 +681,14 @@ export default function ProjectPage() {
   }, [messages]);
 
   useEffect(() => {
+    activityEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [activities]);
+
+  useEffect(() => {
+    if (!isAuthenticated()) router.replace("/auth/login");
+  }, [router]);
+
+  useEffect(() => {
     const mq = window.matchMedia("(max-width: 639px)");
     const update = () => setIsNarrowViewport(mq.matches);
     update();
@@ -489,12 +696,34 @@ export default function ProjectPage() {
     return () => mq.removeEventListener("change", update);
   }, []);
 
-  if (loading || skeletonLoading) {
+  // Abandon the in-flight agent stream if the route unmounts mid-run.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  if (loading) {
     return (
-      <div className="min-h-screen bg-primary text-primary flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-4 border-accent-primary border-t-transparent mx-auto mb-4" />
-          <p className="text-muted">Loading project...</p>
+      <div className="min-h-screen flex flex-col" style={{ background: "var(--bg-canvas)" }}>
+        <div className="flex items-center h-[44px] px-4 border-b" style={{ borderColor: "var(--border-subtle)" }}>
+          <Skeleton style={{ width: 180, height: 14 }} />
+        </div>
+        <div className="flex flex-1 min-h-0">
+          <div className="hidden lg:flex w-56 flex-col gap-2 p-4 border-r" style={{ borderColor: "var(--border-subtle)" }}>
+            <Skeleton style={{ height: 14 }} />
+            <Skeleton style={{ height: 14 }} />
+            <Skeleton style={{ height: 14, width: "70%" }} />
+            <Skeleton style={{ height: 14 }} />
+            <Skeleton style={{ height: 14, width: "85%" }} />
+          </div>
+          <div className="flex-1 p-4 min-w-0">
+            <Skeleton style={{ height: "100%", minHeight: 200 }} />
+          </div>
+          <div
+            className="w-full lg:w-[440px] flex flex-col gap-2 p-4 border-l"
+            style={{ borderColor: "var(--border-subtle)" }}
+          >
+            <Skeleton style={{ height: 48 }} />
+            <Skeleton style={{ height: 48 }} />
+            <Skeleton style={{ height: 48, width: "80%" }} />
+          </div>
         </div>
       </div>
     );
@@ -515,7 +744,10 @@ export default function ProjectPage() {
   }
 
   return (
-    <div className="min-h-screen bg-primary text-primary flex flex-col overflow-x-hidden">
+    <div
+      className="min-h-screen lg:h-screen flex flex-col overflow-x-hidden lg:overflow-hidden"
+      style={{ background: "var(--bg-canvas)" }}
+    >
       <CommandPalette projectId={projectId} commands={[]} />
 
       {error && (
@@ -571,37 +803,19 @@ export default function ProjectPage() {
                   </svg>
                 </button>
               </div>
-              <div className="flex-1 overflow-auto p-4">
+              <div className="flex-1 min-h-0 overflow-auto p-4">
                 <h3 className="text-sm font-medium text-muted mb-2">Files</h3>
-                {fetchingFiles ? (
-                  <div className="space-y-2">
-                    <Skeleton />
-                    <Skeleton />
-                    <Skeleton />
-                  </div>
-                ) : (
-                  <ul className="space-y-1">
-                    {files.map((f) => (
-                      <li key={f.path}>
-                        <button
-                           onClick={() => {
-                             setSelectedFile(f.path);
-                             fetchFile(f.path);
-                             setShowSidebar(false);
-                           }}
-                          className={`flex items-center gap-2 text-left w-full px-2 py-1.5 min-h-[44px] rounded text-sm transition-colors ${
-                            selectedFile === f.path ? "bg-accent-primary" : "hover:bg-secondary"
-                          }`}
-                        >
-                          <span className="font-mono text-xs" style={{ color: "var(--text-secondary)" }}>
-                            {f.name}
-                          </span>
-                        </button>
-                      </li>
-                    ))}
-                    {files.length === 0 && <li className="text-sm text-muted">No files yet</li>}
-                  </ul>
-                )}
+                <FilesPanel
+                  files={files}
+                  loading={fetchingFiles}
+                  sandboxRunning={status?.state === "running"}
+                  selectedFile={selectedFile}
+                  onSelect={(path) => {
+                    setSelectedFile(path);
+                    fetchFile(path);
+                    setShowSidebar(false);
+                  }}
+                />
               </div>
             </aside>
           </div>
@@ -614,44 +828,34 @@ export default function ProjectPage() {
             <div className="p-4 border-b">
               <h3 className="text-sm font-medium text-muted mb-2">Files</h3>
             </div>
-            <div className="flex-1 overflow-auto p-4">
-              {fetchingFiles ? (
-                <div className="space-y-2">
-                  <Skeleton />
-                  <Skeleton />
-                  <Skeleton />
-                </div>
-              ) : (
-                <ul className="space-y-1">
-                  {files.map((f) => (
-                    <li key={f.path}>
-                      <button
-                        onClick={() => {
-                          setSelectedFile(f.path);
-                          fetchFile(f.path);
-                        }}
-                        className={`flex items-center gap-2 text-left w-full px-2 py-1.5 min-h-[44px] rounded text-sm transition-colors ${
-                          selectedFile === f.path ? "bg-accent-primary" : "hover:bg-secondary"
-                        }`}
-                      >
-                        <span className="font-mono text-xs" style={{ color: "var(--text-secondary)" }}>
-                          {f.name}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-                  {files.length === 0 && <li className="text-sm text-muted">No files yet</li>}
-                </ul>
-              )}
+            <div className="flex-1 min-h-0 overflow-auto p-4">
+              <FilesPanel
+                files={files}
+                loading={fetchingFiles}
+                sandboxRunning={status?.state === "running"}
+                selectedFile={selectedFile}
+                onSelect={(path) => {
+                  setSelectedFile(path);
+                  fetchFile(path);
+                }}
+              />
             </div>
           </aside>
 
           {/* Monaco Editor */}
-          <div className="flex-1 flex flex-col min-w-0 border-r border-tertiary">
+          <div className="flex-1 min-h-0 flex flex-col min-w-0 border-r border-tertiary">
             {selectedFile ? (
               <>
-                <div className="p-2 border-b border-tertiary flex justify-between items-center bg-secondary">
+                <div className="p-2 border-b border-tertiary flex justify-between items-center gap-2 bg-secondary">
                   <span className="text-sm text-muted truncate font-mono">{selectedFile}</span>
+                  <button
+                    onClick={saveFile}
+                    disabled={isNarrowViewport}
+                    title={isNarrowViewport ? "Editor is read-only on small screens" : "Save this file"}
+                    className="btn btn-primary h-9 min-h-0 px-3 text-xs shrink-0 disabled:opacity-50"
+                  >
+                    Save
+                  </button>
                 </div>
                 <div className="flex-1 min-h-0">
                   <Editor
@@ -684,12 +888,11 @@ export default function ProjectPage() {
             )}
           </div>
 
-          {/* Chat + Activity */}
+          {/* Chat + Activity — two independently scrolling panes */}
           <div className="w-full lg:w-[440px] flex flex-col min-h-0 bg-secondary">
-            {/* Two columns: conversation left, activity right */}
             <div className="flex-1 min-h-0 flex flex-col md:flex-row">
               {/* Conversation */}
-              <div className="flex-1 flex flex-col min-w-0 md:border-r border-tertiary min-h-[50%] md:min-h-0">
+              <div className="flex-1 min-h-0 flex flex-col min-w-0 md:border-r border-tertiary">
                 <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
                   {messages.length === 0 && !sending && (
                     <div className="flex flex-col items-center justify-center h-full gap-4 text-center px-2">
@@ -700,7 +903,8 @@ export default function ProjectPage() {
                         {["List the files", "Run the tests", "Add a README"].map((prompt) => (
                           <button
                             key={prompt}
-                            onClick={() => setInput(prompt)}
+                            onClick={() => void sendMessage(prompt)}
+                            disabled={sending}
                             className="btn btn-ghost text-xs"
                             style={{ color: "var(--text-secondary)", border: "1px solid var(--border-subtle)" }}
                           >
@@ -725,9 +929,9 @@ export default function ProjectPage() {
                     </div>
                   ))}
                   {sending && (
-                    <div className="bg-secondary/50 border border-tertiary p-3 rounded-lg text-sm">
+                    <div className="border border-tertiary p-3 rounded-lg text-sm" style={{ background: "var(--bg-card)" }}>
                       <div className="flex items-center gap-2">
-                        <div className="flex gap-0.5">
+                        <div className="flex gap-0.5" aria-hidden="true">
                           <div className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: "var(--accent-primary)", animationDelay: "0ms" }} />
                           <div className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: "var(--accent-primary)", animationDelay: "150ms" }} />
                           <div className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: "var(--accent-primary)", animationDelay: "300ms" }} />
@@ -739,7 +943,7 @@ export default function ProjectPage() {
                   <div ref={messagesEndRef} />
                 </div>
                 {/* Input row */}
-                <div className="p-3 border-t border-tertiary bg-secondary">
+                <div className="p-3 border-t border-tertiary bg-secondary shrink-0">
                   <div className="flex gap-2">
                     <span
                       title={`Model: ${modelLabel(modelId)}`}
@@ -752,13 +956,18 @@ export default function ProjectPage() {
                       type="text"
                       value={input}
                       onChange={(e) => setInput(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          void sendMessage();
+                        }
+                      }}
                       placeholder="Ask DAI..."
-                      className="flex-1 px-3 min-h-[44px] bg-primary border border-tertiary rounded-lg outline-none focus:border-accent-primary text-sm"
+                      className="flex-1 min-w-0 px-3 min-h-[44px] bg-primary border border-tertiary rounded-lg outline-none focus:border-accent-primary text-sm"
                       disabled={sending}
                     />
                     <button
-                      onClick={sendMessage}
+                      onClick={() => void sendMessage()}
                       disabled={sending}
                       aria-label="Send message"
                       className="btn btn-primary px-4 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -769,36 +978,90 @@ export default function ProjectPage() {
                 </div>
               </div>
 
-              {/* Activity feed */}
-              <div className="w-full md:w-56 md:flex-shrink-0 border-t md:border-t-0 border-tertiary bg-primary" style={{ maxHeight: "35%", overflowY: "auto" }}>
-                <div className="px-3 py-2 border-b border-tertiary text-xs font-medium" style={{ color: "var(--text-muted)" }}>
+              {/* Activity feed — its own scroll pane */}
+              <div
+                className="h-48 md:h-auto md:w-56 md:flex-shrink-0 flex flex-col min-h-0 border-t md:border-t-0 border-tertiary"
+                style={{ background: "var(--bg-canvas)" }}
+              >
+                <div
+                  className="px-3 py-2 border-b border-tertiary text-xs font-medium shrink-0"
+                  style={{ color: "var(--text-muted)" }}
+                >
                   Activity
                 </div>
-                <div className="p-2 space-y-1">
+                <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-1">
                   {activities.length === 0 && (
                     <p className="text-xs text-muted px-2 py-2">No activity yet</p>
                   )}
                   {activities.map((a) => (
                     <ActivityEntry key={a.id} activity={a} />
                   ))}
+                  {previewUrl && status?.devServerRunning && (
+                    <div className="flex items-center gap-2 px-2 py-2 text-xs">
+                      <span style={{ color: "var(--success)" }}>✓</span>
+                      <span style={{ color: "var(--text-muted)" }}>Ready —</span>
+                      <button onClick={() => setShowPreview(true)} className="underline">
+                        View Preview
+                      </button>
+                    </div>
+                  )}
+                  <div ref={activityEndRef} />
                 </div>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Preview iframe — collapsible */}
-        {showPreview && previewUrl && (
-          <div className="border-t border-tertiary lg:h-48 flex flex-col transition-all">
-            <div className="flex justify-between items-center px-4 py-1.5 bg-secondary border-b border-tertiary cursor-pointer" onClick={() => setShowPreview(false)}>
-              <span className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>Preview</span>
-              <button className="text-xs" style={{ color: "var(--text-muted)" }}>
-                Collapse
+        {/* Preview — collapsible, and always reachable */}
+        <div className="border-t border-tertiary flex flex-col flex-shrink-0">
+          <div className="flex justify-between items-center px-4 h-11 gap-2 bg-secondary border-b border-tertiary">
+            <span className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>
+              Preview
+            </span>
+            <div className="flex items-center gap-2">
+              {previewUrl && (
+                <a
+                  href={previewUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn btn-ghost h-9 min-h-0 px-3 text-xs"
+                  style={{ color: "var(--text-secondary)" }}
+                >
+                  Open in new tab
+                </a>
+              )}
+              <button
+                onClick={() => setShowPreview((p) => !p)}
+                aria-expanded={showPreview}
+                className="btn btn-ghost h-9 min-h-0 px-3 text-xs"
+                style={{ color: "var(--text-muted)" }}
+              >
+                {showPreview ? "Collapse" : "Expand"}
               </button>
             </div>
-            <iframe src={previewUrl} className="flex-1 w-full bg-white" title="Preview" style={{ minHeight: "120px" }} />
           </div>
-        )}
+          {showPreview && (
+            <div className="h-64 lg:h-48 flex flex-col min-h-0">
+              {previewUrl ? (
+                <iframe src={previewUrl} className="flex-1 w-full bg-white" title="Preview" />
+              ) : (
+                <div className="flex-1 flex flex-col items-center justify-center gap-3 p-4 text-center">
+                  <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                    No dev server is running yet.
+                  </p>
+                  <button
+                    onClick={() => void startDevServer()}
+                    disabled={startingDev || status?.state !== "running"}
+                    title={status?.state !== "running" ? "Resume the sandbox first" : undefined}
+                    className="btn btn-primary px-4 text-xs disabled:opacity-50"
+                  >
+                    {startingDev ? "Starting…" : "Start the dev server"}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

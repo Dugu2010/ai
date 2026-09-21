@@ -171,8 +171,54 @@ someone adds it to a project.
 direct editor visit, so a genuinely archived sandbox can be reported live and
 vice versa.
 
+## Bug 42 — page.tsx:746 — root container could not bound its scroll panes
+The page root was `min-h-screen ... flex flex-col`, which grows with its content, so
+the `flex-1 min-h-0` descendants had no definite height to shrink against and the
+"two independently scrolling panes" collapsed into one document-level scroll.
+FIXED: `min-h-screen lg:h-screen … lg:overflow-hidden`, plus `min-h-0` on the
+editor column.
+
+## Bug 41 — page.tsx:748 — command palette wired to an empty command list
+`<CommandPalette projectId={projectId} commands={[]} />` while
+`getDefaultProjectCommands(projectId)` (`components/command-palette.tsx:169`) exists
+specifically for this page and is never imported. Cmd+K therefore opens a modal
+that always reads "No matching commands". Its commands also dispatch
+`refresh-files` / `new-file` / `toggle-preview` CustomEvents that no component
+subscribes to. NOT FIXED — the command palette is not part of the requested
+layout, and wiring it means building a file-creation flow; flagged rather than
+half-implemented.
+
+## Bug 40 — page.tsx — no auth guard on the workspace route
+The page imported `isAuthenticated` and never called it, unlike the dashboard
+(`app/app/projects/page.tsx:22-24`), so an unauthenticated visitor to
+`/app/projects/:id` saw "Project not found" instead of being sent to
+`/auth/login`. FIXED.
+
+## Bug 39 — page.tsx:332-351 — activity pane lost on reload
+`loadHistory` filtered conversation rows to `user`/`assistant`, discarding the
+`tool` rows the backend persists, so the activity feed was empty after any page
+reload even though the agent's actions were in the database. FIXED.
+
+## Bug 38 — page.tsx:441-458 — Save was unreachable
+`saveFile` posted the buffer to `POST /api/workspace/:id`, but no control invoked
+it, so edits made in Monaco were silently discarded on navigation. FIXED: Save in
+the editor header, disabled while the editor is read-only below `sm`.
+
 ---
 
-Total: 37 bugs found. Fixed and verified in source: 1, 2, 3, 4, 5, 6, 8, 9, 10,
-11, 13, 16, 19, 20, 21, 22. Open: 7, 12, 17, 18, 24, 25, 26, 27, 28, 29, 30, 31,
-32, 33, 34, 35, 36, 37 (Bug 14 and 23 superseded by 28 and 29).
+Total: 42 bugs found. Fixed and verified in source: 1, 2, 3, 4, 5, 6, 7, 8, 9,
+10, 11, 12, 13, 16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+33, 34, 35, 36, 38, 39, 40, 42. Not fixed: 41 (out of requested scope,
+documented); 37 (needs a CodeSandbox field that `SandboxInfo` does not expose).
+
+## Verification blocker
+
+`CODESANDBOX_API_KEY` resolves to a **frozen workspace**: every VM start fails with
+`Your workspace has been frozen. Please upgrade or increase your spending limit to
+continue.` Reproduced three ways — resume of two existing sandboxes (`vjsc97`,
+`wnwxjy`) and a fresh `create({ id: "k8dsq1" })`. Consequently `scripts/e2e.ts`,
+which provisions a real sandbox and asserts a `write_file` tool round-trip, cannot
+pass on this account regardless of code state, and the tool-persistence fixes
+(Bugs 26, 39) cannot be exercised end to end. Everything not requiring a live VM
+was verified against the running stack; see the phase report.
+
