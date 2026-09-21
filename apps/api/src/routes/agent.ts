@@ -381,6 +381,9 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       ...history
         .slice(-40)
         .filter((m) => m.role === "user" || m.role === "assistant")
+        // Assistant rows written for a tool-call-only turn persist a null
+        // content; replaying them injects blank turns into the model's context.
+        .filter((m) => m.role === "user" || (m.content ?? "").trim() !== "")
         .map((m) => ({ role: m.role as "user" | "assistant", content: m.content || "" })),
       { role: "user", content: message },
     ];
@@ -388,6 +391,7 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
     await addMessage(convId, { role: "user", content: message, projectId: project.id });
 
     let finalContent: string | null = null;
+    let contentStreamed = false;
     const allToolCalls: { id: string; name: string; arguments: Record<string, unknown>; success: boolean; result?: string }[] = [];
 
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
@@ -395,6 +399,7 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
 
       if (response.content) {
         finalContent = response.content;
+        contentStreamed = true;
         writeSSE(res, "assistant_delta", { text: response.content });
       }
 
@@ -410,6 +415,7 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       await addMessage(convId, {
         role: "assistant",
         content: response.content ?? null,
+        projectId: project.id,
       });
 
       for (const call of response.toolCalls) {
@@ -434,6 +440,7 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
         await addMessage(convId, {
           role: "tool",
           content: result.slice(0, 8000),
+          projectId: project.id,
           toolName: call.name,
           toolArgs: call.arguments,
           toolResult: { success, result: result.slice(0, 8000) },
@@ -445,12 +452,19 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       finalContent = `Completed ${allToolCalls.length} tool operation${allToolCalls.length === 1 ? "" : "s"}.`;
     }
 
-    await addMessage(convId, {
+    // A tool-only turn yields no prose from the model, so stream the summary:
+    // without it the chat pane ends the run with no assistant message at all.
+    if (finalContent && !contentStreamed) {
+      writeSSE(res, "assistant_delta", { text: finalContent });
+    }
+
+    const finalMessage = await addMessage(convId, {
       role: "assistant",
       content: finalContent || "(no content returned)",
+      projectId: project.id,
     });
 
-    writeSSE(res, "done", { messageId: convId });
+    writeSSE(res, "done", { conversationId: convId, messageId: finalMessage.id });
     res.end();
   } catch (error: any) {
     console.error("[agent]", error.message);

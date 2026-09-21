@@ -59,8 +59,10 @@ async function main(): Promise<void> {
 
   const checks: CheckResult[] = [];
 
-  // Health endpoint (no auth required)
+  // Health endpoints (no auth required). /health is the Render probe path;
+  // /api/health is what the app and its callers use.
   checks.push(await check("GET", "/health", 200));
+  checks.push(await check("GET", "/api/health", 200));
 
   // Auth endpoints (should NOT 404 — 401/405 is OK, means route exists)
   checks.push(await check("POST", "/api/auth/login", "*"));

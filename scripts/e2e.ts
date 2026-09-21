@@ -51,9 +51,9 @@ interface ErrorEvent {
   message: string;
 }
 
-interface SSEEvent {
+interface SSEEvent<T = Record<string, unknown>> {
   event: string;
-  data: ToolCallEvent | ToolResultEvent | AssistantDeltaEvent | DoneEvent | ErrorEvent;
+  data: T;
 }
 
 const BASE_URL = process.env.DAI_API_URL || "http://localhost:3000";

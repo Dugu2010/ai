@@ -356,7 +356,8 @@ router.post("/:projectId/command", async (req: Request, res: Response) => {
 });
 
 // GET /api/workspace/:projectId/status — sandbox state WITHOUT waking it up.
-// Uses sandboxes.get() (metadata only). Resume is deliberately NOT called here:
+// Uses sandboxes.get() for existence and listRunning() for whether the VM is
+// actually up. Resume is deliberately NOT called here:
 // per https://codesandbox.stream/docs/sdk/resume, waking should be an explicit,
 // user-visible step (POST /preview/proxy), never a polling side effect.
 router.get("/:projectId/status", async (req: Request, res: Response) => {
@@ -380,21 +381,30 @@ router.get("/:projectId/status", async (req: Request, res: Response) => {
       });
       return;
     }
-    let info: unknown = null;
+    let reachable = false;
+    let running = false;
     try {
-      info = await codesandbox().getSandboxInfo(project.sandboxId);
+      const client = codesandbox();
+      reachable = (await client.getSandboxInfo(project.sandboxId)) !== null;
+      if (reachable) {
+        running = await client.isSandboxRunning(project.sandboxId);
+      }
     } catch (error: any) {
       console.warn(`[workspace:status] sandbox lookup failed: ${error?.message ?? error}`);
     }
+    const archived = isArchived(project.lastAccessedAt);
+    // `reachable` alone is NOT "running": SandboxInfo carries no state field, so
+    // a metadata hit only proves the sandbox exists. `listRunning()` decides.
+    const state = !reachable ? "unknown" : running ? "running" : archived ? "archived" : "hibernated";
     res.json({
-      state: info ? "running" : "unknown",
+      state,
       sandboxId: project.sandboxId,
       previewUrl: project.previewUrl,
-      devServerRunning: project.devServerRunning,
+      devServerRunning: running ? project.devServerRunning : false,
       devServerPort: project.previewPort,
       lastError: project.lastError,
-      isHibernated: project.isHibernated,
-      isArchived: isArchived(project.lastAccessedAt),
+      isHibernated: !running,
+      isArchived: archived,
       bootupType: project.bootupType,
       isUpToDate: project.isUpToDate,
     });

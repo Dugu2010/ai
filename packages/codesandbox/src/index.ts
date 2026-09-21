@@ -39,6 +39,8 @@ export interface ResumeResult {
 
 const DEFAULT_HIBERNATION_TIMEOUT_SECONDS = 30;
 const DEFAULT_VM_TIER = VMTier.Micro;
+const DEFAULT_EXEC_TIMEOUT_MS = 120_000;
+const TIMED_OUT = Symbol("timedOut");
 
 export interface CreateSandboxOptions {
   template?: string;
@@ -86,26 +88,17 @@ export class CodeSandboxClient {
     this.client = client;
     this.sandboxId = sandbox.id;
 
-    // Wait until the sandbox is fully booted. `sandbox.bootupType` is the live
-    // typed getter (SandboxInfo from `sandboxes.get()` is metadata-only and has
-    // no bootupType). CLEAN/FORK boots run setup, which we wait for step by
-    // step; anything else is polled until it reports RUNNING/RESUME.
-    let bootupType = sandbox.bootupType;
+    // `sandbox.bootupType` is a snapshot taken from the create response, not a
+    // live getter — the compiled accessor returns the frozen
+    // `pitcherManagerResponse` captured at construction, so it can never change
+    // on a live object and must not be polled. On a CLEAN/FORK boot the setup
+    // tasks run again and have to finish before any command executes; any other
+    // bootup type means the VM is already up.
+    // Ref: https://codesandbox.stream/docs/sdk/resume ("Clean Bootups")
+    const bootupType = sandbox.bootupType;
     if (bootupType === "CLEAN" || bootupType === "FORK") {
       for (const step of client.setup.getSteps()) {
         await step.waitUntilComplete();
-      }
-      bootupType = "RUNNING";
-    }
-    const maxPoll = 60;
-    let pollCount = 0;
-    while (bootupType !== "RUNNING" && bootupType !== "RESUME" && pollCount < maxPoll) {
-      await new Promise((r) => setTimeout(r, 2000));
-      pollCount++;
-      try {
-        bootupType = sandbox.bootupType;
-      } catch {
-        break;
       }
     }
 
@@ -177,6 +170,20 @@ export class CodeSandboxClient {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Whether the sandbox's VM is actually up, without waking it.
+   *
+   * `sandboxes.get()` cannot answer this: `SandboxInfo` is
+   * `{ id, createdAt, updatedAt, title?, description?, privacy, tags }` and has
+   * no state field at all, so a successful metadata read only proves the sandbox
+   * exists. `listRunning()` is the only non-waking source of truth; the CodeSandbox
+   * docs note it is refreshed roughly every 30 seconds.
+   */
+  async isSandboxRunning(sandboxId: string): Promise<boolean> {
+    const running = await this.sdk.sandboxes.listRunning();
+    return running.vms.some((vm) => vm.id === sandboxId);
   }
 
   async listRunning(): Promise<{ concurrentVmCount: number; concurrentVmLimit: number }> {
@@ -295,16 +302,35 @@ export class CodeSandboxClient {
   async exec(command: string, options?: { cwd?: string; timeoutMs?: number; env?: Record<string, string> }): Promise<ExecResult> {
     const client = await this.getClient();
     const startedAt = Date.now();
+    const timeoutMs = options?.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
+    // The SDK takes no timeout — `ShellRunOpts` is
+    // `{ dimensions?, name?, env?, cwd?, asGlobalSession? }` — so the wait is
+    // bounded here, otherwise a hung command pins the request open indefinitely.
+    // The command itself keeps running in the sandbox; only the result is lost.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<typeof TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+    });
     try {
-      const output = await client.commands.run(command, {
-        cwd: options?.cwd,
-        env: options?.env,
-      });
+      const outcome = await Promise.race([
+        client.commands.run(command, { cwd: options?.cwd, env: options?.env }),
+        timedOut,
+      ]);
+      const durationMs = Date.now() - startedAt;
+      if (outcome === TIMED_OUT) {
+        return {
+          stdout: null,
+          stderr: `Command timed out after ${timeoutMs}ms`,
+          exitCode: null,
+          durationMs,
+          timedOut: true,
+        };
+      }
       return {
-        stdout: output,
+        stdout: outcome,
         stderr: null,
         exitCode: 0,
-        durationMs: Date.now() - startedAt,
+        durationMs,
         timedOut: false,
       };
     } catch (error: any) {
@@ -315,6 +341,8 @@ export class CodeSandboxClient {
         durationMs: Date.now() - startedAt,
         timedOut: false,
       };
+    } finally {
+      clearTimeout(timer);
     }
   }
 

@@ -75,9 +75,13 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 });
 
 // ---------- Routes ----------
-app.get("/health", (_req: Request, res: Response) => {
+// `/health` is the Render health check path (render.yaml healthCheckPath);
+// `/api/health` is the path the app and its verification scripts call.
+const health = (_req: Request, res: Response) => {
   res.json({ ok: true });
-});
+};
+app.get("/health", health);
+app.get("/api/health", health);
 
 app.use("/api/auth", authRoutes);
 app.use("/api/projects", projectRoutes);
