@@ -1,6 +1,13 @@
 node_modules
 dist
 .next
-.env.local
 pgdata
 *.tsbuildinfo
+
+# Local secrets. DEPLOY.md and README.md both tell you to `cp .env.example .env`,
+# so every env file except the checked-in examples must be ignored by name —
+# previously only `.env.local` was, which left a live `.env` (DATABASE_URL,
+# NIM_API_KEY, MODAL_TOKEN_SECRET) one `git add -A` away from being pushed.
+.env
+.env.*
+!.env.example
