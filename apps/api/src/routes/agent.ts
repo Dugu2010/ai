@@ -10,7 +10,6 @@ import { createAgentRun, insertActivityEvent, updateAgentRun } from "@dai/db";
 import { NIMClient, type ChatMessage } from "@dai/nim";
 import { requireAuth, getAuthUser } from "../lib/auth.js";
 import { resolveNimConfig } from "../lib/nim-config.js";
-import { validatePath } from "../lib/validation.js";
 import {
   acquireWorkspace,
   assertWithinStorageQuota,

@@ -80,17 +80,18 @@ export function verifyJwt(token: string): AuthUser | null {
   }
 }
 
+/**
+ * Bearer token only.
+ *
+ * This previously also accepted an `auth_token` cookie. Nothing in DAI ever set
+ * that cookie, and the API has no CSRF token — a cookie-based credential in a
+ * token-only client would be a cross-site request forgery surface for no benefit.
+ * Removing it deletes dead code and the exposure in one step; SSE clients get
+ * the token via the Authorization header, which fetch() can set.
+ */
 function extractToken(req: Request): string | null {
   const auth = req.headers.authorization;
   if (auth && auth.startsWith("Bearer ")) return auth.slice(7).trim();
-  // Cookie fallback (same-origin browser requests)
-  const cookies = req.headers.cookie;
-  if (cookies) {
-    for (const part of cookies.split(";")) {
-      const [k, ...rest] = part.trim().split("=");
-      if (k === "auth_token" || k === "auth-token") return rest.join("=");
-    }
-  }
   return null;
 }
 

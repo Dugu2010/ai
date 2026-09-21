@@ -178,3 +178,115 @@ frontend.
 Two layers: the Postgres advisory lock in `acquireWorkspace`, and
 `countActiveSandboxes` / `MAX_ACTIVE_SANDBOXES` (10) with the existing
 `sandbox_queue` table for cross-request provisioning backpressure.
+
+## Agent loop, budgets and reversibility
+
+The loop lives in `apps/api/src/lib/agent-loop.ts`; `routes/agent.ts` is a thin
+HTTP/SSE adapter and holds no agent logic.
+
+### Runtime decision layer
+
+`lib/runtime-policy.ts` exposes `needsRuntime(operation)` for every operation in
+the union. The classification is a provider fact, not a preference: Modal's
+JavaScript `Volume` has no file API, and `SandboxFilesystem` is constructed over
+an `exec` function, so workspace I/O is always compute. Rather than hide that,
+the cost is made explicit and metered.
+
+Genuinely free operations — project and runtime metadata, conversation history,
+the activity timeline, checkpoint listings and diffs, and the undo/redo
+*decisions* — are served from PostgreSQL and never touch Modal. `GET
+/api/workspace/:id/checkpoints` and `GET /api/projects/:id/agent/status` are the
+clearest examples: the Changes panel and the timeline render with no compute at
+all.
+
+`RuntimeBudget` gates, and its limits are env-configurable:
+
+| Limit | Default | Effect when hit |
+| --- | --- | --- |
+| `MAX_RUNTIME_ACTIVATIONS_PER_AGENT_RUN` | 1 | no second Sandbox is started for a run |
+| `MAX_EXEC_CALLS_PER_AGENT_RUN` | 40 | tool calls return a budget error; run ends `budget_exhausted` |
+| `MAX_RUNTIME_SECONDS_PER_AGENT_RUN` | 600 | same, on wall-clock |
+| `MAX_COMMAND_TIMEOUT` | 300000 | clamps every command's own deadline |
+| `MAX_AGENT_ITERATIONS` | 12 | loop stops before the next model call |
+
+Exhaustion emits `agent.budget.exhausted` with the reason, and the run's outcome
+distinguishes "stopped for cost" from "failed", so the UI never has to guess.
+
+### Cost discipline actually implemented
+
+- One activation per run; every later tool reuses the same attached Sandbox.
+- All file edits a model turn requests are applied by ONE
+  `workspace.applyFileMutations` call, not one per file.
+- Reads are deduplicated through a per-run cache, because a second read is a
+  second command on this provider.
+- Undo/redo is likewise a single batched, compare-and-swap command.
+- Workspace size is measured with `du` on a Sandbox that is already open, never
+  by starting one just to ask.
+- No keepalive, and no timer anywhere in the activity path: `activity.ts` and
+  `agent-loop.ts` contain no `setTimeout`/`setInterval`, so nothing can emit a
+  progress event that does not correspond to work.
+- The one deliberate poll is bounded and factual: `waitForPort` probes the
+  listening socket with backoff so a preview waits for a real service rather
+  than for a fixed sleep.
+
+### Activity timeline, without chain of thought
+
+`lib/activity.ts` defines typed events and the emitter. Rules:
+
+- Titles are built from results that came back: a real file count, a real exit
+  code, a parsed failure count, a real tunnel URL.
+- Events are persisted before being published, so a reload reproduces the exact
+  timeline.
+- The prompt sent to NIM, and anything the model emits besides its answer and
+  its tool calls, never reaches this channel. There is no `reasoning`/
+  `thinking` field anywhere in the NIM path — asserted by tests.
+- The one "planning" style message the user can see is guidance the *server*
+  writes when it interrupts a loop, not recovered model state.
+
+### Loop detection
+
+`lib/loop-detector.ts` fingerprints each step (`callKey`), the error signature,
+and whether the workspace actually changed. It reports `identical_call`,
+`repeated_failure`, `thrashing` and `no_progress`. The key design point: a
+repeated command is only a loop when nothing changed in between, so an agent
+running the same test file while genuinely fixing failures is not interrupted.
+
+First detection injects one bounded strategy change. A second detection pauses
+the run, emits `agent.loop.detected`, and hands the user
+Continue / Retry differently / Undo. A stuck run is never silently retried
+forever and never simply fails without explanation.
+
+### Undo and rollback
+
+`lib/checkpoint-service.ts` records, per run, the pre- and post-image of every
+path it intended to change. Pre-images are captured in one batched read *before*
+any write lands, so "before" is the state the agent actually found. A path
+touched twice keeps its original pre-image.
+
+Restore is compare-and-swap: each entry carries `expectCurrent`, so a file the
+user edited in the meantime is reported as a conflict and left alone rather than
+clobbered. Files over `MAX_CHECKPOINT_FILE_BYTES`, or holding binary content, are
+recorded as non-reversible with a reason and then skipped — undo says so instead
+of half-reverting silently. `partial` status exists precisely so the UI cannot
+offer a redo that would not line up.
+
+### Storage quota
+
+Modal has no per-project quota, so `MAX_PROJECT_WORKSPACE_BYTES` (default 50
+GiB) is enforced by DAI: usage is measured on an already-open Sandbox, stored on
+the project, and checked from PostgreSQL *before* a run starts. Exceeding it
+refuses the run with a stated reason rather than continuing to grow.
+
+Deletion terminates tagged Sandboxes, removes only that project's subPath, and
+cascades its metadata. `purgeTarget()` rejects anything that is not exactly one
+directory under `projects/`, because the cleanup runs against a mount of the
+shared Volume and a malformed id there would delete every project's files.
+
+### Authentication
+
+The API accepts a Bearer token only. It previously also read an `auth_token`
+cookie that nothing ever set; since there is no CSRF token anywhere in the
+system, that unused path was a cross-site request forgery surface waiting for a
+future cookie, so it was removed. Consequence worth stating plainly: DAI has no
+CSRF protection because it has no cookie credential to protect — introducing
+cookie sessions later requires adding a CSRF secret first.
