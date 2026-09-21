@@ -123,6 +123,11 @@
   --danger: #eb5757;
   --info: #06b6d4;
 
+  /* Added/removed line wash for checkpoint diffs. Alpha only, so the row reads
+     correctly over any surface and both themes stay legible. */
+  --diff-add-bg: rgba(16, 185, 129, 0.10);
+  --diff-remove-bg: rgba(235, 87, 87, 0.10);
+
   /* Linear shadows — pure black only */
   --shadow-hairline: rgba(0, 0, 0, 0.03) 0px 1.2px 0px 0px;
   --shadow-ring: rgba(0, 0, 0, 0.33) 0px 0px 0px 1px;
@@ -169,6 +174,10 @@
   --warning: #d97706;
   --danger: #dc2626;
   --info: #0891b2;
+
+  /* Slightly stronger wash on white, where the dark-theme alpha disappears. */
+  --diff-add-bg: rgba(5, 150, 105, 0.09);
+  --diff-remove-bg: rgba(220, 38, 38, 0.08);
 
   --shadow-hairline: rgba(0, 0, 0, 0.04) 0px 1.2px 0px 0px;
   --shadow-ring: rgba(0, 0, 0, 0.08) 0px 0px 0px 1px;
@@ -441,4 +450,14 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* Toast entry — animated in CSS so it needs no mount state in JS. The global
+   prefers-reduced-motion rule above collapses it to an instant appearance. */
+@keyframes dai-toast-in {
+  from { opacity: 0; transform: translateX(100%); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.toast-enter {
+  animation: dai-toast-in 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
