@@ -78,23 +78,23 @@ test.
 
 ## Remaining known issues
 
-- **`packages/ui` has no consumer.** `apps/web` was its last importer and no
-  longer declares it. `build:packages` and `typecheck` still build it. Either
-  adopt it or delete it; it is not currently load-bearing.
-- **Stale reports are still tracked**: `ARCHITECTURE_MIGRATION.md`,
-  `AUDIT.md`, `FINAL_INTEGRATION_READINESS.md`, `PHASE3_FINAL.md`,
-  `PHASE3_PROGRESS.md`, `PROGRESS.md`, `STATUS.txt`, `UI_FINAL.md`. `AUDIT.md`
-  additionally describes the CodeSandbox-era runtime. Left in place rather than
-  deleted, since removing tracked history is a call for the owner.
 - **`bun run lint` covers `lint:web` and `lint:modal` only.** `apps/api` has no
   lint script, so its style is unchecked (types are checked).
-- **`POST /api/workspace/:projectId/command` still exists.** It is
-  auth- and ownership-gated and confined to `SAFE_COMMANDS` minus
-  `DANGEROUS_PATTERNS`, and no UI calls it. It is a deliberate agent-side
-  surface, not a user terminal — but it is the widest door in the API and worth
-  a review of whether the route still needs to be reachable from a client.
+- **The command allowlist is not the security boundary, and cannot be.** `bash`
+  and `sh` are allowlisted because the agent needs shells. A payload pass now
+  strips quoting and scans the whole command, so `bash -c 'rm -rf /'` and
+  friends are refused, but real isolation comes from the Modal Sandbox and the
+  per-project Volume subPath. Treat the allowlist as accident-reduction.
 - **Modal's JS SDK is 0.x beta**; breaking changes can land in a patch bump.
   The pinned surface is recorded in `RUNTIME_ARCHITECTURE.md`.
+- **No DOM test environment.** `apps/web` has no jsdom/happy-dom, so there are
+  no component render tests — the 40 tests cover the pure logic behind the
+  components, not the rendering.
+
+Resolved in the pass that followed this report: `packages/ui` had no consumer
+and was removed; the superseded reports moved to `docs/archive/` behind a new
+top-level `README.md`; and `POST /api/workspace/:projectId/command` was deleted
+(see below).
 
 ## Genuinely unverified
 
@@ -123,3 +123,78 @@ them:
   well it codes.
 - **Deployment.** Neither the Render blueprint nor the Vercel build has been run
   against those platforms from here.
+
+---
+
+# Pre-live hardening pass
+
+Run after the report above, still with **zero** provider contact.
+
+Gate on the committed tree:
+
+| Command | Result |
+|---|---|
+| `bun run build:packages` | rc=0 |
+| `bun run typecheck` (types, db, modal, nim, web, api) | rc=0 |
+| `bun run lint` | rc=0 |
+| `bun run build:web` | rc=0 |
+| `bun run test` | **372 passed, 0 failed** (modal 87, api 245, web 40) |
+
+## The command endpoint was removed, not guarded
+
+`POST /api/workspace/:projectId/command` was commented "Internal endpoint used
+by the agent tooling". Nothing used it. The agent executes through in-process
+`Workspace` calls in `lib/agent-run.ts`, which applies the same
+`validateCommandOptions` check *and* `budget.commandTimeoutMs()`; no code in
+`apps/api` or `apps/web` ever fetched that route, and the only references left
+were in archived Freestyle-era reports.
+
+Meanwhile the route was the one command path that escaped metering: it called
+`acquireWorkspace` (a possible Sandbox creation) outside the budget and capped
+its timeout at the global 300s rather than the per-run limit. So it offered no
+capability the agent path lacks, and weaker guarantees than it. Removed, along
+with its now-unused imports. `validateCommand`/`validateCommandOptions` are
+unchanged and remain in force on the agent path.
+
+`test/http-surface.test.ts` now pins the whole mounted surface, so a
+command-like route under any name (`command|exec|shell|terminal|tty|spawn|run-`)
+fails the suite rather than being re-added quietly.
+
+## Command validation strengthened, not weakened
+
+`bash -c 'rm -rf /'` previously passed validation, and a test asserted it did.
+The anchored `DANGEROUS_PATTERNS` can only inspect a command's first word, so
+anything wrapped in a shell was invisible to them. A second pass now strips
+quote characters and scans the whole string for root/home/`/workspace` recursive
+deletes, `--no-preserve-root`, `mkfs`, `dd of=/dev/…` and fork bombs.
+`bash -c 'rm -rf node_modules'`, `bash -c 'npm test'` and `rm -rf /workspace/build`
+are still accepted — 11 refusal cases and 9 allow cases are pinned in
+`test/validation.test.ts`, which also pins that a bare `rm`/`find`/`kill` is
+refused for not being allowlisted.
+
+This is accident reduction, not a boundary: `bash` and `sh` must stay available,
+so isolation remains the Sandbox plus the Volume subPath. The old test that
+pinned the limitation as accepted behaviour was replaced rather than deleted.
+
+## Cost guards re-checked in code
+
+- File operations report `requiresRuntime: true` with the reason Modal exposes
+  no Volume file API; there is no cheap path to pretend otherwise, and the
+  budget meters what it costs.
+- Activations, exec calls, runtime seconds and iterations are each capped by
+  `RuntimeBudget` and covered by `test/runtime-policy.test.ts` (25 tests).
+- A dev server is launched only after `isPortListening` says the port is free,
+  so a run cannot stack duplicates.
+- No sleep, ping or noise-command keeps a Sandbox alive anywhere;
+  `idleTimeoutMs` reclaims compute and nothing fights it. The 15s
+  `setInterval` in `lib/sandbox-queue.ts` polls PostgreSQL only, and the
+  `Connection: keep-alive` header in `routes/agent.ts` is SSE, not runtime.
+- Every test in the suite runs without credentials; the live suite is separate
+  and opt-in.
+
+## Documentation
+
+Added a top-level `README.md` that states the architecture canonically —
+including that Kubernetes is not part of DAI — and moved the eight superseded
+reports to `docs/archive/` with `docs/archive/README.md` explaining what each
+was and why it is stale. `git mv` preserved their history; nothing was deleted.

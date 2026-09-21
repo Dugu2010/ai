@@ -32,7 +32,7 @@ bun run typecheck
 
 ### Tests
 ```bash
-bun run test              # packages/modal (87) + apps/api (217) + apps/web (40); no credentials needed
+bun run test              # packages/modal (87) + apps/api (245) + apps/web (40); no credentials needed
 bun run test:modal
 bun run test:api
 bun run test:web
