@@ -6,38 +6,27 @@
     "build": "next build",
     "dev": "next dev",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "vitest run"
   },
   "dependencies": {
-    "@dai/db": "workspace:*",
-    "@dai/nim": "workspace:*",
     "@dai/types": "workspace:*",
-    "@dai/ui": "workspace:*",
     "@monaco-editor/react": "^4.7.0",
     "autoprefixer": "^10.4.20",
-    "bcryptjs": "^3.0.2",
-    "clsx": "^2.1.1",
-    "dotenv": "^16.4.7",
-    "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.468.0",
     "next": "^16.3.5",
     "postcss": "^8.5.3",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "tailwindcss": "^3.4.17",
-    "zod": "^3.24.1"
+    "tailwindcss": "^3.4.17"
   },
   "devDependencies": {
     "@testing-library/react": "^16.1.0",
-    "@types/bcryptjs": "^2.4.6",
-    "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.10.2",
-    "@types/pg": "^8.11.10",
     "@types/react": "^19.0.2",
     "eslint": "^9.17.0",
     "eslint-config-next": "^16.3.5",
     "monaco-editor": "0.56.0",
-    "tsup": "^8.2.0",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   }

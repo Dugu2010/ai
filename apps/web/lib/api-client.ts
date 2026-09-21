@@ -112,11 +112,14 @@ export async function fetchApi(url: string, options?: RequestInit): Promise<Resp
     credentials: 'include', // For cookie-based auth
   });
 
-  // Handle 401 - clear state and redirect to login (except when already there,
-  // so a failed login attempt can still show its error message)
+    // Handle 401 - clear state and redirect to login (except when already there,
+  // so a failed login attempt can still show its error message).
+  //
+  // A full-page navigation is deliberate here, and `replace` rather than `href`
+  // so the Back button cannot return to a page whose session is already gone.
   if (response.status === 401 && !window.location.pathname.startsWith('/auth/login')) {
     clearAuthState();
-    window.location.href = '/auth/login';
+    window.location.replace('/auth/login');
   }
 
   return response;
