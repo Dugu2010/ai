@@ -62,6 +62,38 @@ const DANGEROUS_PATTERNS = [
   /sudo\s+rm/,
 ];
 
+/**
+ * Destructive payloads wherever they appear, including inside a quoted
+ * `bash -c '...'` body.
+ *
+ * The anchored patterns above can only ever see the first word of a command, so
+ * they are structurally blind to anything wrapped in a shell. This second pass
+ * drops the quote characters and scans the whole string. It deliberately
+ * targets only filesystem root and home directories: `rm -rf node_modules` and
+ * `rm -rf /workspace/build` are ordinary agent work and must keep working.
+ *
+ * This is defence in depth, not the boundary. `bash` and `sh` are allowlisted
+ * because the agent genuinely needs shells, so isolation comes from the Modal
+ * Sandbox and the per-project Volume subPath — not from this list.
+ */
+const PAYLOAD_PATTERNS: RegExp[] = [
+  // rm <flags...> /  |  / *  (root or everything under it), but not /workspace/x
+  /\brm\s+(-\S+\s+)*\/(\*|\s|$)/,
+  // rm <flags...> ~  or  ~/...
+  /\brm\s+(-\S+\s+)*~(\s|\/|$)/,
+  /--no-preserve-root/,
+  // Unconditional recursive delete of the whole mounted workspace.
+  /\brm\s+(-\S+\s+)*\/workspace(\*|\s|$)/,
+  /\bmkfs(\.\w+)?\b/,
+  /\bdd\b[^\n]*\bof=\/dev\//,
+  /:\(\)\s*\{[^}]*\|[^}]*&[^}]*\}\s*;?\s*:/,
+];
+
+/** Strip shell quoting so a payload wrapped in `bash -c '…'` is still visible. */
+function payloads(command: string): string {
+  return command.replace(/['"`\\]/g, " ").replace(/\s+/g, " ").trim();
+}
+
 export interface CommandValidationResult {
   valid: boolean;
   error?: string;
@@ -84,6 +116,12 @@ export function validateCommand(command: string): CommandValidationResult {
   for (const pattern of DANGEROUS_PATTERNS) {
     if (pattern.test(trimmed)) {
       return { valid: false, error: "Command contains dangerous patterns" };
+    }
+  }
+  const unwrapped = payloads(trimmed);
+  for (const pattern of PAYLOAD_PATTERNS) {
+    if (pattern.test(unwrapped)) {
+      return { valid: false, error: "Command contains a destructive payload" };
     }
   }
   return { valid: true };

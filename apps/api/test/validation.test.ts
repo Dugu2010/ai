@@ -106,11 +106,51 @@ describe("command hardening", () => {
     expect(validateCommandOptions({ command: "npm test", cwd: "/workspace" }).valid).toBe(true);
   });
 
-  // Documents a real, pre-existing limitation rather than pretending it away:
-  // `bash` is allowlisted because the agent needs shells, so the pattern list
-  // cannot be the security boundary. Isolation comes from the Modal Sandbox and
-  // the per-project Volume subPath, not from this allowlist.
-  it("pins the known bash-allowlist limitation", () => {
-    expect(validateCommand("bash -c 'rm -rf /'").valid).toBe(true);
+  // The boundary is the Sandbox plus the per-project Volume subPath, not this
+  // allowlist: `bash` and `sh` must stay available to the agent. What the list
+  // can still do is refuse an indiscriminate wipe, so the payload pass strips
+  // quoting and scans the whole command rather than only its first word.
+  it.each([
+    "bash -c 'rm -rf /'",
+    'sh -c "rm -rf /"',
+    "bash -lc \"rm -rf /*\"",
+    "bash -c 'rm -rf ~'",
+    "bash -c 'rm -rf --no-preserve-root /'",
+    "bash -c 'rm -rf /workspace'",
+    "echo hi && rm -rf /",
+    "node build.js; rm -rf ~",
+    "bash -c 'mkfs.ext4 /dev/sda'",
+    "bash -c 'dd if=/dev/zero of=/dev/sda'",
+    ":(){ :|:& };:",
+  ])("refuses a destructive payload wrapped in a shell: %s", (command) => {
+    expect(validateCommand(command).valid).toBe(false);
   });
+
+  // Payloads reached through an allowlisted interpreter must still be checked
+  // for over-matching: an ordinary build-cache clean is routine agent work.
+  it.each([
+    "bash -c 'npm test'",
+    "sh -c 'echo built'",
+    "bash -c 'rm -rf node_modules'",
+    "bash -c 'rm -rf dist coverage'",
+    "bash -c 'rm -rf /workspace/build'",
+    "bash -c 'rm -rf ./tmp'",
+    "bash -c 'for f in *.ts; do echo $f; done'",
+    "bash -c \"find . -name '*.log' -delete\"",
+    "npm run build && npm test",
+  ])("still allows ordinary agent work: %s", (command) => {
+    expect(validateCommand(command).valid).toBe(true);
+  });
+
+  // Pre-existing allowlist behaviour, pinned so it cannot quietly widen: a bare
+  // `rm`/`find` is refused for not being an allowlisted program, independently
+  // of the payload scan above.
+  it.each(["rm -rf node_modules", "find . -delete", "du -sh /", "kill -9 1"])(
+    "refuses a program that is not allowlisted: %s",
+    (command) => {
+      const result = validateCommand(command);
+      expect(result.valid).toBe(false);
+      expect(result.error).toMatch(/not allowed/);
+    }
+  );
 });
