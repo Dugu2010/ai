@@ -1,251 +1,264 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { isAuthenticated, fetchApi } from "@/lib/api-client";
-import { useToast } from "@/components/toast";
-import { ThemeToggle } from "@/components/theme-toggle";
+/**
+ * Dashboard: the projects this account owns, and the one action that matters —
+ * start a workspace. Real loading, empty and error states; no filler.
+ */
 
-interface Project {
-  id: string;
-  name: string;
-  slug: string;
-  status: string;
-  previewUrl?: string | null;
-}
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { FolderPlus, Layers, TriangleAlert } from "lucide-react";
+import type { Project, ProjectStatus } from "@dai/types";
+import { requestJson, asArray } from "@/lib/api-contract";
+import { isAuthenticated } from "@/lib/api-client";
+import { useAuthenticated } from "@/lib/use-auth";
+import { relativeTime } from "@/lib/format";
+import { toneVar, type Tone } from "@/lib/agent-view";
+import { AppHeader } from "@/components/app-header";
+import { EmptyState, NoticeBar, PanelHeader, TextButton, ToneDot } from "@/components/panel";
+import { Skeleton } from "@/components/loading-skeleton";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,48}[a-z0-9]$/;
 
-function useAuthRedirect() {
-  const router = useRouter();
-  useEffect(() => {
-    if (!isAuthenticated()) router.replace("/auth/login");
-  }, [router]);
+const STATUS_VIEW: Record<ProjectStatus, { label: string; tone: Tone }> = {
+  ready: { label: "Ready", tone: "success" },
+  provisioning: { label: "Provisioning", tone: "warning" },
+  paused: { label: "Idle", tone: "neutral" },
+  error: { label: "Error", tone: "danger" },
+  archived: { label: "Archived", tone: "warning" },
+};
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 50);
 }
 
-function statusStyle(status: string): { bg: string; fg: string } {
-  if (status === "ready") return { bg: "color-mix(in srgb, var(--success) 14%, transparent)", fg: "var(--success)" };
-  if (status === "provisioning" || status === "queued") return { bg: "color-mix(in srgb, var(--warning) 14%, transparent)", fg: "var(--warning)" };
-  if (status === "error") return { bg: "color-mix(in srgb, var(--danger) 14%, transparent)", fg: "var(--danger)" };
-  return { bg: "var(--bg-tertiary)", fg: "var(--text-muted)" };
+function ProjectCard({ project }: { project: Project }) {
+  const view = STATUS_VIEW[project.status as ProjectStatus] ?? { label: project.status, tone: "neutral" as Tone };
+  return (
+    <Link
+      href={`/app/projects/${project.id}`}
+      className="group flex flex-col gap-2 p-4 rounded-lg border transition-colors hover:bg-[color-mix(in_srgb,var(--text-primary)_3%,transparent)]"
+      style={{ borderColor: "var(--border-color)", background: "var(--bg-panel)" }}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <h3 className="text-[15px] truncate" style={{ fontWeight: 590, letterSpacing: "-0.01em" }}>
+          {project.name}
+        </h3>
+        <span className="badge shrink-0" style={{ color: toneVar(view.tone), background: `color-mix(in srgb, ${toneVar(view.tone)} 10%, transparent)` }}>
+          <ToneDot tone={view.tone} />
+          {view.label}
+        </span>
+      </div>
+      <p className="font-mono text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
+        {project.slug}
+      </p>
+      {project.description ? (
+        <p className="text-[12px] leading-5 line-clamp-2" style={{ color: "var(--text-secondary)" }}>
+          {project.description}
+        </p>
+      ) : null}
+      <p className="mt-auto flex items-center gap-1.5 text-[11px]" style={{ color: "var(--text-muted)" }}>
+        <span aria-hidden="true">·</span>
+        {project.lastAccessedAt ? `Opened ${relativeTime(project.lastAccessedAt)}` : "Never opened"}
+      </p>
+    </Link>
+  );
 }
 
 export default function ProjectsPage() {
-  useAuthRedirect();
   const router = useRouter();
-  const { showToast } = useToast();
-
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [loading, setLoading] = useState(true);
+  const authed = useAuthenticated();
+  const [projects, setProjects] = useState<Project[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [slugTouched, setSlugTouched] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
-  const fetchProjects = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async () => {
     try {
-      const res = await fetchApi("/api/projects");
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error((data as any).error || `Failed to load projects (${res.status})`);
-      }
-      const data = await res.json();
-      setProjects(Array.isArray(data) ? (data as Project[]) : []);
+      const rows = await requestJson<Project[]>("/api/projects");
+      setProjects(asArray<Project>(rows));
       setError(null);
-    } catch (err: any) {
-      setError(err.message || "Failed to load projects");
-    } finally {
-      setLoading(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load your projects");
     }
   }, []);
 
   useEffect(() => {
-    fetchProjects();
-  }, [fetchProjects]);
+    if (!authed) {
+      if (!isAuthenticated()) router.replace("/auth/login");
+      return;
+    }
+    void (async () => {
+      await load();
+    })();
+  }, [authed, load, router]);
 
-  // Auto-derive the slug from the name until the user edits it manually.
-  const handleNameChange = (value: string) => {
-    setName(value);
-    if (!slugTouched) {
-      setSlug(
-        value
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "-")
-          .replace(/^-+|-+$/g, "")
-          .slice(0, 50)
-      );
+  const slugError = slug && !SLUG_RE.test(slug) ? "3–50 characters: lowercase letters, numbers and hyphens, starting and ending with a letter or number." : null;
+
+  const canSubmit = useMemo(() => name.trim().length > 0 && SLUG_RE.test(slug) && !creating, [name, slug, creating]);
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    setCreating(true);
+    setCreateError(null);
+    try {
+      const created = await requestJson<Project>("/api/projects", {
+        method: "POST",
+        body: JSON.stringify({ slug, name: name.trim() }),
+      });
+      router.push(`/app/projects/${created.id}`);
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : "Unable to create the project");
+      setCreating(false);
+      await load();
     }
   };
 
-  const createProject = useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault();
-      if (!name.trim() || !SLUG_RE.test(slug) || creating) return;
-      setCreating(true);
-      try {
-        const res = await fetchApi("/api/projects", {
-          method: "POST",
-          body: JSON.stringify({ slug, name: name.trim() }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error((data as any).error || `Failed to create project (${res.status})`);
-        showToast("Project created", "success");
-        setName("");
-        setSlug("");
-        setSlugTouched(false);
-        if ((data as any).id) {
-          // The new VM provisions in the background; the project view polls status.
-          router.push(`/app/projects/${(data as any).id}`);
-        } else {
-          await fetchProjects();
-        }
-      } catch (err: any) {
-        showToast(err.message || "Failed to create project", "error");
-      } finally {
-        setCreating(false);
-      }
-    },
-    [name, slug, creating, fetchProjects, showToast, router]
-  );
-
-  const slugError = slug && !SLUG_RE.test(slug)
-    ? "3–50 chars: lowercase letters, numbers, hyphens; must start/end with a letter or number"
-    : undefined;
-
   return (
-    <div className="min-h-screen bg-primary text-primary flex flex-col">
-      <header className="glass sticky top-0 z-40 border-b" style={{ height: "var(--header-h)" }}>
-        <div className="max-w-6xl mx-auto px-4 md:px-6 h-full flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Link
-              href="/"
-              aria-label="DAI home"
-              className="w-8 h-8 rounded-md flex items-center justify-center text-white"
-              style={{ background: "var(--accent-primary)" }}
-            >
-              <span className="font-semibold text-sm">D</span>
-            </Link>
-            <span style={{ fontWeight: 590 }}>Projects</span>
-          </div>
-          <div className="flex items-center gap-3">
-            <Link href="/settings" className="btn btn-ghost" style={{ color: "var(--text-muted)" }}>
-              Settings
-            </Link>
-            <ThemeToggle />
-          </div>
-        </div>
-      </header>
+    <div className="min-h-[100dvh] flex flex-col" style={{ background: "var(--bg-canvas)" }}>
+      <AppHeader
+        title="Projects"
+        links={[{ label: "Settings", href: "/settings" }]}
+      />
 
       <main id="main-content" className="flex-1">
-        <div className="max-w-6xl mx-auto px-4 md:px-6 py-8 md:py-12">
-          {/* Create project */}
-          <section className="card mb-8">
-            <h1 className="text-xl mb-4" style={{ fontWeight: 590 }}>New project</h1>
-            <form onSubmit={createProject} className="flex flex-col md:flex-row gap-3">
-              <div className="flex-1">
-                <label htmlFor="project-name" className="sr-only">Project name</label>
-                <input
-                  id="project-name"
-                  type="text"
-                  value={name}
-                  onChange={(e) => handleNameChange(e.target.value)}
-                  placeholder="My app"
-                  className="input"
-                  maxLength={80}
-                />
-              </div>
-              <div className="flex-1">
-                <label htmlFor="project-slug" className="sr-only">Project slug</label>
-                <input
-                  id="project-slug"
-                  type="text"
-                  value={slug}
-                  onChange={(e) => {
-                    setSlugTouched(true);
-                    setSlug(e.target.value);
-                  }}
-                  placeholder="my-app"
-                  className="input font-mono"
-                  maxLength={50}
-                  aria-invalid={slugError ? "true" : undefined}
-                  aria-describedby={slugError ? "slug-error" : undefined}
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={creating || !name.trim() || !SLUG_RE.test(slug)}
-                className="btn btn-primary md:w-auto"
-              >
-                {creating ? "Creating…" : "Create project"}
-              </button>
-            </form>
-            {slugError && (
-              <p id="slug-error" role="alert" className="text-xs mt-2" style={{ color: "var(--danger)" }}>
-                {slugError}
-              </p>
-            )}
-            <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>
-              Each project gets a real Linux VM with your dev server on an HTTPS preview URL.
-            </p>
-          </section>
-
-          {/* Error / loading / list */}
-          {error && (
-            <div
-              className="p-3 mb-6 flex justify-between items-center rounded-lg border"
-              style={{
-                background: "color-mix(in srgb, var(--danger) 10%, transparent)",
-                borderColor: "color-mix(in srgb, var(--danger) 35%, transparent)",
+        <div className="max-w-6xl mx-auto px-4 md:px-6 py-8 md:py-12 space-y-8">
+          <section
+            className="rounded-lg border overflow-hidden"
+            style={{ borderColor: "var(--border-color)", background: "var(--bg-panel)" }}
+          >
+            <PanelHeader title="New workspace" />
+            <form
+              className="p-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submit();
               }}
             >
-              <span style={{ color: "var(--danger)" }}>{error}</span>
-              <button onClick={fetchProjects} className="btn btn-danger min-h-[44px] px-3">
-                Retry
-              </button>
-            </div>
-          )}
+              <div className="grid md:grid-cols-[1fr_1fr_auto] gap-3">
+                <div>
+                  <label htmlFor="project-name" className="block text-[12px] mb-1.5" style={{ color: "var(--text-secondary)" }}>
+                    Name
+                  </label>
+                  <input
+                    id="project-name"
+                    type="text"
+                    value={name}
+                    maxLength={80}
+                    autoComplete="off"
+                    placeholder="Docs site"
+                    onChange={(event) => {
+                      setName(event.target.value);
+                      if (!slugTouched) setSlug(slugify(event.target.value));
+                    }}
+                    className="input h-11 min-h-[44px] text-[14px]"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="project-slug" className="block text-[12px] mb-1.5" style={{ color: "var(--text-secondary)" }}>
+                    Address
+                  </label>
+                  <input
+                    id="project-slug"
+                    type="text"
+                    value={slug}
+                    maxLength={50}
+                    autoComplete="off"
+                    placeholder="docs-site"
+                    aria-invalid={slugError ? true : undefined}
+                    aria-describedby={slugError ? "project-slug-help" : undefined}
+                    onChange={(event) => {
+                      setSlugTouched(true);
+                      setSlug(event.target.value.toLowerCase());
+                    }}
+                    className="input h-11 min-h-[44px] font-mono text-[13px]"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button type="submit" disabled={!canSubmit} className="btn btn-primary w-full md:w-auto px-5">
+                    <FolderPlus size={15} aria-hidden="true" />
+                    {creating ? "Creating…" : "Create"}
+                  </button>
+                </div>
+              </div>
+              <div id="project-slug-help" className="mt-2 space-y-1">
+                {slugError ? (
+                  <p className="text-[11px]" style={{ color: "var(--danger)" }}>
+                    {slugError}
+                  </p>
+                ) : null}
+                <p className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                  A workspace is a persistent project directory with its own dev server and preview URL. Provisioning takes a
+                  moment; DAI starts working as soon as it is ready.
+                </p>
+              </div>
+              {createError ? (
+                <div className="mt-3">
+                  <NoticeBar tone="danger" message={createError} />
+                </div>
+              ) : null}
+            </form>
+          </section>
 
-          {loading ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              <div className="skeleton h-36" />
-              <div className="skeleton h-36" />
-              <div className="skeleton h-36" />
+          <section aria-labelledby="projects-heading" className="space-y-3">
+            <div className="flex items-baseline justify-between gap-3">
+              <h2 id="projects-heading" className="text-[13px] uppercase tracking-[0.08em]" style={{ color: "var(--text-muted)", fontWeight: 510 }}>
+                Your workspaces
+              </h2>
+              {projects && projects.length > 0 ? (
+                <span className="font-mono text-[11px]" style={{ color: "var(--text-muted)" }}>
+                  {projects.length}
+                </span>
+              ) : null}
             </div>
-          ) : projects.length === 0 ? (
-            <div className="text-center py-16">
-              <p style={{ color: "var(--text-muted)" }}>No projects yet — create your first one above.</p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {projects.map((p) => {
-                const s = statusStyle(p.status);
-                return (
-                  <Link
-                    key={p.id}
-                    href={`/app/projects/${p.id}`}
-                    className="card flex flex-col gap-2 transition-colors"
-                    style={{ boxShadow: "var(--shadow-ring)" }}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <span className="truncate" style={{ fontWeight: 590 }}>{p.name}</span>
-                      <span className="badge flex-shrink-0" style={{ background: s.bg, color: s.fg }}>
-                        {p.status}
-                      </span>
-                    </div>
-                    <span className="font-mono text-xs truncate" style={{ color: "var(--text-muted)" }}>
-                      {p.slug}
-                    </span>
-                    <span className="text-sm mt-1" style={{ color: "var(--accent-primary)" }}>
-                      Open project →
-                    </span>
-                  </Link>
-                );
-              })}
-            </div>
-          )}
+
+            {error ? (
+              <NoticeBar
+                tone="danger"
+                message={error}
+                action={<TextButton variant="ghost" onClick={() => void load()} className="text-[12px]">Retry</TextButton>}
+              />
+            ) : null}
+
+            {!projects && !error ? (
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="rounded-lg border p-4 space-y-2" style={{ borderColor: "var(--border-color)" }}>
+                    <Skeleton style={{ height: 16, width: "60%" }} />
+                    <Skeleton style={{ height: 10, width: "40%" }} />
+                    <Skeleton style={{ height: 10, width: "80%" }} />
+                  </div>
+                ))}
+              </div>
+            ) : projects && projects.length === 0 ? (
+              <div className="rounded-lg border" style={{ borderColor: "var(--border-color)", background: "var(--bg-panel)" }}>
+                <EmptyState
+                  icon={<Layers size={18} strokeWidth={1.75} />}
+                  title="No workspaces yet"
+                  hint="Create one above. DAI gives it a real project directory, then reads, edits and tests inside it."
+                />
+              </div>
+            ) : (
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {projects?.map((project) => (
+                  <ProjectCard key={project.id} project={project} />
+                ))}
+              </div>
+            )}
+          </section>
+
+          <p className="flex items-start gap-2 text-[11px] leading-5 max-w-[70ch]" style={{ color: "var(--text-muted)" }}>
+            <TriangleAlert size={13} aria-hidden="true" className="mt-0.5 shrink-0" />
+            Workspaces idle without compute after a while. The files stay; the next run reattaches what is needed.
+          </p>
         </div>
       </main>
     </div>

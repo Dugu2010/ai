@@ -5,7 +5,7 @@ import { ToastProvider } from "../components/toast";
 
 export const metadata = {
   title: "DAI — Your AI coding agent. Browser-based.",
-  description: "DAI is a browser-based AI coding agent working inside a real Linux VM: file edits, commands, dev servers and live preview — no terminal required.",
+  description: "DAI is a browser-based AI coding agent that reads, edits and tests your project in a hosted workspace — with a live activity timeline, per-run undo and visible cost budgets. No terminal required.",
 };
 
 export const viewport = {

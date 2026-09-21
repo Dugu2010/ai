@@ -1,332 +1,338 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
-import { isAuthenticated, setAuthState, fetchApi } from "../../../lib/api-client";
+/**
+ * Sign in / create account.
+ *
+ * One form, two modes. Validation is per-field and inline, submission failures
+ * are reported in the caller's words, and a network failure says the API could
+ * not be reached rather than blaming the password.
+ */
 
-interface ValidationErrors {
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { Eye, EyeOff, Lock, TriangleAlert } from "lucide-react";
+import { fetchApi, isAuthenticated, setAuthState } from "@/lib/api-client";
+import { useAuthenticated } from "@/lib/use-auth";
+import { Wordmark } from "@/components/app-header";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { NoticeBar } from "@/components/panel";
+
+interface AuthResponse {
+  token?: string;
+  email?: string;
+  userId?: string;
+  error?: string;
+}
+
+interface FieldErrors {
+  name?: string;
   email?: string;
   password?: string;
-  confirmPassword?: string;
-  name?: string;
+  confirm?: string;
+}
+
+const STRENGTH: Array<{ label: string; color: string }> = [
+  { label: "Very weak", color: "var(--danger)" },
+  { label: "Weak", color: "var(--danger)" },
+  { label: "Fair", color: "var(--warning)" },
+  { label: "Good", color: "var(--warning)" },
+  { label: "Strong", color: "var(--success)" },
+];
+
+function validateEmail(value: string): string | undefined {
+  if (!value.trim()) return "Email is required";
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim())) return "Enter a valid email address";
+  return undefined;
+}
+
+function validatePassword(value: string, registering: boolean): string | undefined {
+  if (!value) return "Password is required";
+  if (value.length < 8) return "Use at least 8 characters";
+  if (value.length > 128) return "Use fewer than 128 characters";
+  if (!registering) return undefined;
+  if (!/[0-9]/.test(value)) return "Include at least one number";
+  return undefined;
+}
+
+function passwordScore(value: string): number {
+  let score = 0;
+  if (value.length >= 8) score += 1;
+  if (value.length >= 12) score += 1;
+  if (/[a-z]/.test(value) && /[A-Z]/.test(value)) score += 1;
+  if (/[0-9]/.test(value)) score += 1;
+  if (/[^a-zA-Z0-9]/.test(value)) score += 1;
+  return Math.min(score, STRENGTH.length) - 1;
+}
+
+function Field({
+  id,
+  label,
+  type,
+  value,
+  onChange,
+  error,
+  autoComplete,
+  placeholder,
+  trailing,
+  hint,
+}: {
+  id: string;
+  label: string;
+  type: "text" | "email" | "password";
+  value: string;
+  onChange: (value: string) => void;
+  error?: string;
+  autoComplete?: string;
+  placeholder?: string;
+  trailing?: React.ReactNode;
+  hint?: React.ReactNode;
+}) {
+  return (
+    <div>
+      <label htmlFor={id} className="block text-[12px] mb-1.5" style={{ color: "var(--text-secondary)" }}>
+        {label}
+      </label>
+      <div className="relative">
+        <input
+          id={id}
+          name={id}
+          type={type}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          autoComplete={autoComplete}
+          placeholder={placeholder}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? `${id}-error` : undefined}
+          className="input h-11 min-h-[44px] text-[14px] pr-11"
+        />
+        {trailing}
+      </div>
+      {error ? (
+        <p id={`${id}-error`} role="alert" className="text-[11px] mt-1.5" style={{ color: "var(--danger)" }}>
+          {error}
+        </p>
+      ) : null}
+      {hint}
+    </div>
+  );
 }
 
 export default function LoginPage() {
   const router = useRouter();
+  const authed = useAuthenticated();
+  const [mode, setMode] = useState<"signin" | "register">("signin");
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [name, setName] = useState("");
-  const [isRegister, setIsRegister] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-  const [errors, setErrors] = useState<ValidationErrors>({});
+  const [confirm, setConfirm] = useState("");
+  const [reveal, setReveal] = useState(false);
+  const [errors, setErrors] = useState<FieldErrors>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const registering = mode === "register";
 
   useEffect(() => {
-    if (isAuthenticated()) {
-      router.push("/app/projects");
-    }
-  }, [router]);
+    if (authed && isAuthenticated()) router.replace("/app/projects");
+  }, [authed, router]);
 
-  const validateEmail = (email: string): string | undefined => {
-    if (!email) return "Email is required";
-    const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!re.test(email)) return "Invalid email address";
-    return undefined;
-  };
+  const strength = useMemo(() => {
+    if (!password) return null;
+    const index = Math.max(0, passwordScore(password));
+    const entry = STRENGTH[index] ?? { label: "Very weak", color: "var(--danger)" };
+    return { index, ...entry };
+  }, [password]);
 
-  const validatePassword = (password: string): string | undefined => {
-    if (!password) return "Password is required";
-    if (password.length < 8) return "Password must be at least 8 characters";
-    if (password.length > 128) return "Password must be less than 128 characters";
-    return undefined;
-  };
-
-  const validateConfirmPassword = (password: string, confirmPassword: string): string | undefined => {
-    if (isRegister && password !== confirmPassword) {
-      return "Passwords do not match";
-    }
-    return undefined;
-  };
-
-  const validateName = (name: string): string | undefined => {
-    if (isRegister && !name.trim()) return "Name is required";
-    if (name.length > 100) return "Name must be less than 100 characters";
-    return undefined;
-  };
-
-  const getPasswordStrength = (password: string): { score: number; label: string; color: string } => {
-    let score = 0;
-    if (password.length >= 8) score++;
-    if (password.length >= 12) score++;
-    if (/[a-z]/.test(password) && /[A-Z]/.test(password)) score++;
-    if (/[0-9]/.test(password)) score++;
-    if (/[^a-zA-Z0-9]/.test(password)) score++;
-    const strengths: { label: string; color: string }[] = [
-      { label: "Very Weak", color: "var(--danger)" },
-      { label: "Weak", color: "color-mix(in srgb, var(--danger) 70%, var(--warning))" },
-      { label: "Fair", color: "var(--warning)" },
-      { label: "Good", color: "color-mix(in srgb, var(--warning) 60%, var(--success))" },
-      { label: "Strong", color: "var(--success)" },
-    ];
-    const idx = Math.min(score, 4); return { score, label: (strengths[idx]! as any).label, color: (strengths[idx]! as any).color };
-  };
-
-  const validateForm = () => {
-    const newErrors: ValidationErrors = {};
+  const validate = (): FieldErrors => {
+    const next: FieldErrors = {};
     const emailError = validateEmail(email);
-    if (emailError) newErrors.email = emailError;
-    const passwordError = validatePassword(password);
-    if (passwordError) newErrors.password = passwordError;
-    if (isRegister) {
-      const nameError = validateName(name);
-      if (nameError) newErrors.name = nameError;
-      const confirmError = validateConfirmPassword(password, confirmPassword);
-      if (confirmError) newErrors.confirmPassword = confirmError;
+    if (emailError) next.email = emailError;
+    const passwordError = validatePassword(password, registering);
+    if (passwordError) next.password = passwordError;
+    if (registering) {
+      if (!name.trim()) next.name = "Name is required";
+      if (confirm !== password) next.confirm = "Passwords do not match";
     }
-    return newErrors;
+    return next;
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError("");
-    const newErrors = validateForm();
-    if (Object.keys(newErrors).length > 0) {
-      setErrors(newErrors);
-      return;
-    }
-    setLoading(true);
-    setErrors({});
+  const submit = async () => {
+    setFormError(null);
+    const found = validate();
+    setErrors(found);
+    if (Object.keys(found).length > 0) return;
+    setSubmitting(true);
     try {
       const res = await fetchApi("/api/auth/login", {
         method: "POST",
         body: JSON.stringify({
-          email,
+          email: email.trim(),
           password,
-          name: isRegister ? name : undefined,
+          name: registering ? name.trim() : undefined,
         }),
       });
-      let data: any = null;
-      try {
-        data = await res.json();
-      } catch {
-        // Non-JSON response (e.g. HTML error page from a proxy)
+      const data = (await res.json().catch(() => null)) as AuthResponse | null;
+      if (!res.ok || !data?.token) {
+        throw new Error(data?.error || (registering ? "Could not create the account" : "Email or password is not recognised"));
       }
-      if (!res.ok) {
-        throw new Error(data?.error || `Authentication failed (${res.status})`);
-      }
-      if (!data?.token) {
-        throw new Error("Authentication failed: no token returned");
-      }
-      setAuthState(data.token, data.email, data.userId);
-      router.push("/app/projects");
-    } catch (err: any) {
-      // fetch() throws a TypeError ("Failed to fetch") when the request never
-      // reaches the API: network error, DNS failure, or a CORS rejection.
-      setError(
-        err?.name === "TypeError"
+      setAuthState(data.token, data.email ?? email.trim(), data.userId ?? "");
+      router.replace("/app/projects");
+    } catch (err) {
+      // fetch() rejects with a TypeError when the request never reached the API:
+      // offline, DNS, or a CORS rejection. Say that, not "wrong password".
+      const message =
+        err instanceof Error && err.name === "TypeError"
           ? "Cannot reach the server. Check your connection, and that the API is awake (free tiers sleep)."
-          : err?.message || "Authentication failed",
-      );
-    } finally {
-      setLoading(false);
+          : err instanceof Error && err.message
+            ? err.message
+            : "Authentication failed";
+      setFormError(message);
+      setSubmitting(false);
     }
   };
-
-  const handleInlineEmailChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setEmail(e.target.value);
-    if (e.target.value) {
-      const error = validateEmail(e.target.value);
-      setErrors((prev) => ({ ...prev, email: error || undefined }));
-    } else {
-      setErrors((prev) => ({ ...prev, email: undefined }));
-    }
-  };
-
-  const handleInlinePasswordChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setPassword(e.target.value);
-    if (e.target.value) {
-      const error = validatePassword(e.target.value);
-      setErrors((prev) => ({ ...prev, password: error || undefined }));
-    } else {
-      setErrors((prev) => ({ ...prev, password: undefined }));
-    }
-  };
-
-  const handleConfirmPasswordChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setConfirmPassword(e.target.value);
-    if (e.target.value) {
-      const error = validateConfirmPassword(password, e.target.value);
-      setErrors((prev) => ({ ...prev, confirmPassword: error || undefined }));
-    } else {
-      setErrors((prev) => ({ ...prev, confirmPassword: undefined }));
-    }
-  };
-
-  const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setName(e.target.value);
-    if (e.target.value) {
-      const error = validateName(e.target.value);
-      setErrors((prev) => ({ ...prev, name: error || undefined }));
-    } else {
-      setErrors((prev) => ({ ...prev, name: undefined }));
-    }
-  };
-
-  const passwordStrength = getPasswordStrength(password);
-
-  const emailError = errors.email;
-  const passwordError = errors.password;
-  const confirmError = errors.confirmPassword;
-  const nameError = errors.name;
 
   return (
-    <div className="min-h-screen bg-primary flex items-center justify-center px-4">
-      <div className="w-full max-w-md">
-        <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-primary mb-2">DAI</h1>
-          <p className="text-muted">
-            {isRegister ? "Create your account" : "Sign in to your account"}
+    <div className="min-h-[100dvh] flex flex-col" style={{ background: "var(--bg-canvas)" }}>
+      <div className="flex items-center justify-between px-4 md:px-6 h-16">
+        <Link href="/" aria-label="DAI home">
+          <Wordmark />
+        </Link>
+        <ThemeToggle />
+      </div>
+
+      <main id="main-content" className="flex-1 flex items-start justify-center px-4 pb-16">
+        <div className="w-full max-w-[420px] pt-4 md:pt-10">
+          <h1 className="text-[26px] leading-tight" style={{ fontWeight: 590, letterSpacing: "-0.03em" }}>
+            {registering ? "Create your account" : "Sign in to DAI"}
+          </h1>
+          <p className="mt-1.5 text-[13px] leading-6" style={{ color: "var(--text-muted)" }}>
+            {registering
+              ? "Your workspaces, files and settings are stored against this account."
+              : "Use the account your workspaces belong to."}
           </p>
-        </div>
 
-        <form onSubmit={handleSubmit} className="bg-secondary rounded-2xl p-8 border shadow-soft">
-          {error && (
-            <div
-              className="mb-6 p-3 rounded-lg text-sm"
-              role="alert"
-              style={{
-                background: "color-mix(in srgb, var(--danger) 10%, transparent)",
-                border: "1px solid color-mix(in srgb, var(--danger) 50%, transparent)",
-                color: "var(--danger)",
-              }}
-            >
-              {error}
-            </div>
-          )}
+          <form
+            className="mt-6 rounded-lg border p-4 md:p-6 space-y-4"
+            style={{ borderColor: "var(--border-color)", background: "var(--bg-panel)" }}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submit();
+            }}
+          >
+            {formError ? <NoticeBar tone="danger" message={formError} /> : null}
 
-          {isRegister && (
-            <div className="mb-5">
-              <label htmlFor="name" className="block text-primary text-sm font-medium mb-2">Full Name</label>
-              <input
+            {registering ? (
+              <Field
                 id="name"
+                label="Name"
                 type="text"
                 value={name}
-                onChange={handleNameChange}
-                placeholder="John Doe"
-                aria-invalid={nameError ? "true" : undefined}
-                aria-describedby={nameError ? "name-error" : undefined}
-                className={`w-full px-4 py-3 bg-primary/50 border rounded-lg text-primary placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-accent-primary focus-visible:ring-2 focus-visible:ring-accent-primary transition-colors ${nameError ? "border-[color:var(--danger)]" : "border-tertiary"}`}
+                onChange={setName}
+                error={errors.name}
+                autoComplete="name"
+                placeholder="Your name"
               />
-              {nameError && <p id="name-error" role="alert" className="text-sm mt-1" style={{ color: "var(--danger)" }}>{nameError}</p>}
-            </div>
-          )}
+            ) : null}
 
-          <div className="mb-5">
-             <label htmlFor="email" className="block text-primary text-sm font-medium mb-2">Email</label>
-            <input
+            <Field
               id="email"
+              label="Email"
               type="email"
               value={email}
-              onChange={handleInlineEmailChange}
+              onChange={setEmail}
+              error={errors.email}
+              autoComplete="email"
               placeholder="you@example.com"
-              aria-invalid={emailError ? "true" : undefined}
-              aria-describedby={emailError ? "email-error" : undefined}
-               className={`w-full px-4 py-3 bg-primary/50 border rounded-lg text-primary placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-accent-primary focus-visible:ring-2 focus-visible:ring-accent-primary transition-colors ${emailError ? "border-[color:var(--danger)]" : "border-tertiary"}`}
             />
-            {emailError && <p id="email-error" role="alert" className="text-sm mt-1" style={{ color: "var(--danger)" }}>{emailError}</p>}
-          </div>
 
-          <div className="mb-5">
-             <label htmlFor="password" className="block text-primary text-sm font-medium mb-2">Password</label>
-            <div className="relative">
-              <input
-                id="password"
-                type={showPassword ? "text" : "password"}
-                value={password}
-                onChange={handleInlinePasswordChange}
-                placeholder="••••••••"
-                aria-invalid={passwordError ? "true" : undefined}
-                aria-describedby={passwordError ? "password-error" : undefined}
-                className={`w-full px-4 py-3 bg-primary/50 border rounded-lg text-primary placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-accent-primary focus-visible:ring-2 focus-visible:ring-accent-primary transition-colors pr-12 ${passwordError ? "border-[color:var(--danger)]" : "border-tertiary"}`}
-              />
-              <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                 className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary rounded"
-              >
-                {showPassword ? "Hide" : "Show"}
-              </button>
-            </div>
-            {password && (
-              <div className="mt-2" role="progressbar" aria-valuenow={passwordStrength.score} aria-valuemin={0} aria-valuemax={4}>
-                <div className="flex gap-1 h-1">
-                  {[0, 1, 2, 3, 4].map((i) => (
-                     <div
-                       key={i}
-                       className="flex-1 rounded"
-                       style={i < passwordStrength.score ? { background: passwordStrength.color } : { background: "var(--bg-tertiary)" }}
-                     />
-                  ))}
-                </div>
-                 <p className="text-xs text-muted mt-1">{passwordStrength.label}</p>
-              </div>
-            )}              {passwordError && <p id="password-error" role="alert" className="text-sm mt-1" style={{ color: "var(--danger)" }}>{passwordError}</p>}
-          </div>
-
-          {isRegister && (
-            <div className="mb-5">
-               <label htmlFor="confirmPassword" className="block text-primary text-sm font-medium mb-2">Confirm Password</label>
-              <div className="relative">
-                <input
-                  id="confirmPassword"
-                  type={showConfirmPassword ? "text" : "password"}
-                  value={confirmPassword}
-                  onChange={handleConfirmPasswordChange}
-                  placeholder="••••••••"
-                  aria-invalid={confirmError ? "true" : undefined}
-                  aria-describedby={confirmError ? "confirm-password-error" : undefined}
-                   className={`w-full px-4 py-3 bg-primary/50 border rounded-lg text-primary placeholder-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-accent-primary focus-visible:ring-2 focus-visible:ring-accent-primary transition-colors pr-12 ${confirmError ? "border-[color:var(--danger)]" : "border-tertiary"}`}
-                />
+            <Field
+              id="password"
+              label="Password"
+              type={reveal ? "text" : "password"}
+              value={password}
+              onChange={setPassword}
+              error={errors.password}
+              autoComplete={registering ? "new-password" : "current-password"}
+              placeholder={registering ? "At least 8 characters" : "Your password"}
+              trailing={
                 <button
                   type="button"
-                  onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary rounded"
+                  onClick={() => setReveal((prev) => !prev)}
+                  aria-label={reveal ? "Hide password" : "Show password"}
+                  className="absolute right-0 top-0 h-11 w-11 inline-flex items-center justify-center rounded-md"
+                  style={{ color: "var(--text-muted)" }}
                 >
-                  {showConfirmPassword ? "Hide" : "Show"}
+                  {reveal ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}
                 </button>
-              </div>
-              {confirmError && <p id="confirm-password-error" role="alert" className="text-sm mt-1" style={{ color: "var(--danger)" }}>{confirmError}</p>}
-            </div>
-          )}
+              }
+              hint={
+                strength && registering ? (
+                  <div className="mt-2 flex items-center gap-2">
+                    <div className="flex gap-1 flex-1" role="meter" aria-valuenow={strength.index + 1} aria-valuemin={1} aria-valuemax={STRENGTH.length} aria-label="Password strength">
+                      {STRENGTH.map((entry, index) => (
+                        <span
+                          key={entry.label}
+                          className="flex-1 rounded-full"
+                          style={{
+                            height: 3,
+                            background: index <= strength.index ? strength.color : "color-mix(in srgb, var(--text-primary) 10%, transparent)",
+                          }}
+                        />
+                      ))}
+                    </div>
+                    <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                      {strength.label}
+                    </span>
+                  </div>
+                ) : null
+              }
+            />
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full py-3 bg-accent-primary hover:bg-accent-hover rounded-lg text-primary font-medium disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-accent-primary focus-visible:ring-2 focus-visible:ring-accent-primary transition-colors"
-          >
-            {loading ? (isRegister ? "Creating account..." : "Signing in...") : isRegister ? "Create account" : "Sign in"}
-          </button>
+            {registering ? (
+              <Field
+                id="confirm"
+                label="Confirm password"
+                type={reveal ? "text" : "password"}
+                value={confirm}
+                onChange={setConfirm}
+                error={errors.confirm}
+                autoComplete="new-password"
+                placeholder="Repeat the password"
+              />
+            ) : null}
 
-          <div className="mt-6 text-center">
-            <button
-              type="button"
-              onClick={() => {
-                setIsRegister(!isRegister);
-                setError("");
-                setErrors({});
-                setPassword("");
-                setConfirmPassword("");
-              }}
-              className="text-muted hover:text-primary text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary rounded"
-            >
-              {isRegister ? "Already have an account? Sign in" : "Don't have an account? Create one"}
+            <button type="submit" disabled={submitting} className="btn btn-primary w-full">
+              {submitting ? <Lock size={14} aria-hidden="true" /> : null}
+              {submitting ? (registering ? "Creating account…" : "Signing in…") : registering ? "Create account" : "Sign in"}
             </button>
-          </div>
-        </form>
-      </div>
+
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setMode(registering ? "signin" : "register");
+                  setErrors({});
+                  setFormError(null);
+                  setConfirm("");
+                }}
+                className="text-[12px] underline-offset-4 hover:underline"
+                style={{ color: "var(--text-muted)", minHeight: 44 }}
+              >
+                {registering ? "I already have an account" : "Create a new account"}
+              </button>
+              <Link href="/" className="text-[12px]" style={{ color: "var(--text-muted)" }}>
+                Home
+              </Link>
+            </div>
+          </form>
+
+          <p className="mt-4 flex items-start gap-2 text-[11px] leading-5" style={{ color: "var(--text-muted)" }}>
+            <TriangleAlert size={13} aria-hidden="true" className="mt-0.5 shrink-0" />
+            If the API is on a sleeping free tier, the first request can take a few seconds to wake.
+          </p>
+        </div>
+      </main>
     </div>
   );
 }

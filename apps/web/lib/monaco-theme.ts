@@ -37,3 +37,40 @@ export const daiDarkTheme: editor.IStandaloneThemeData = {
     "editorWidget.border": "#ffffff0d",
   },
 };
+
+// Light counterpart, mirroring the Vercel palette in globals.css (canvas
+// #ffffff, panel #fafafa, card #f2f2f2, ink #171717, hairline rgba(0,0,0,.06)).
+// The editor follows the app theme instead of staying dark in a light shell.
+export const DAI_LIGHT_THEME_NAME = "dai-light";
+
+export const daiLightTheme: editor.IStandaloneThemeData = {
+  base: "vs",
+  inherit: true,
+  rules: [
+    { token: "comment", foreground: "6b7280", fontStyle: "italic" },
+    { token: "keyword", foreground: "6d28d9" },
+    { token: "string", foreground: "047857" },
+    { token: "number", foreground: "b45309" },
+    { token: "function", foreground: "1d4ed8" },
+    { token: "variable", foreground: "171717" },
+    { token: "type", foreground: "6d28d9" },
+  ],
+  colors: {
+    "editor.background": "#ffffff",
+    "editor.foreground": "#171717",
+    "editorLineNumber.foreground": "#c4c4c4",
+    "editorLineNumber.activeForeground": "#6b6b6b",
+    "editor.lineHighlightBackground": "#fafafa",
+    "editor.selectionBackground": "#5e6ad233",
+    "editorCursor.foreground": "#5e6ad2",
+    "editorIndentGuide.background": "#ebebeb",
+    "editorWidget.background": "#fafafa",
+    "editorWidget.border": "#0000000f",
+  },
+};
+
+export const MONACO_FONTS = {
+  fontFamily: "JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, monospace",
+  fontSize: 13,
+} as const;
+

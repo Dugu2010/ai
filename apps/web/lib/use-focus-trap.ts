@@ -16,7 +16,11 @@ export function useFocusTrap<T extends HTMLElement>(
   onClose: () => void,
 ): void {
   const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+  // Written from an effect, not during render: mutating a ref in the render
+  // phase is invisible to React and is flagged by the compiler.
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
     if (!active) return;

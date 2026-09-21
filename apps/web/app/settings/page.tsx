@@ -1,294 +1,325 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
-import { useRouter } from "next/navigation";
-import { isAuthenticated, logout, fetchApi } from "../../lib/api-client";
-import { getTheme, toggleTheme, type Theme } from "../../lib/theme";
-import { useFocusTrap } from "../../lib/use-focus-trap";
+/**
+ * Settings.
+ *
+ * Account identity, the model the agent calls, the endpoint it calls and the
+ * provider key stored against the account. Saving is explicit: nothing is
+ * written on load, and the key field only sends a value when you typed one.
+ */
 
-function useDebounce<T>(value: T, delay: number): T {
-  const [debouncedValue, setDebouncedValue] = useState(value);
-  useEffect(() => {
-    const handler = setTimeout(() => setDebouncedValue(value), delay);
-    return () => clearTimeout(handler);
-  }, [value, delay]);
-  return debouncedValue;
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { ArrowLeft, LogOut } from "lucide-react";
+import { isAuthenticated, logout } from "@/lib/api-client";
+import { asArray, requestJson } from "@/lib/api-contract";
+import { useAuthenticated } from "@/lib/use-auth";
+import { useTheme } from "@/lib/use-theme";
+import { modelLabel } from "@/lib/format";
+import { AppHeader } from "@/components/app-header";
+import { EmptyState, NoticeBar, PanelHeader } from "@/components/panel";
+import { Skeleton } from "@/components/loading-skeleton";
+import { useToast } from "@/components/toast";
+
+interface SettingsResponse {
+  email?: string;
+  userId?: string;
+  model?: string;
+  baseUrl?: string;
+  apiKeySet?: boolean;
+}
+
+interface ModelsResponse {
+  models?: string[];
+  source?: string;
+}
+
+function Section({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-lg border overflow-hidden" style={{ borderColor: "var(--border-color)", background: "var(--bg-panel)" }}>
+      <PanelHeader title={title} />
+      <div className="p-4 space-y-4">
+        {description ? (
+          <p className="text-[12px] leading-5" style={{ color: "var(--text-muted)" }}>
+            {description}
+          </p>
+        ) : null}
+        {children}
+      </div>
+    </section>
+  );
+}
+
+function ReadField({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div>
+      <span className="block text-[12px] mb-1.5" style={{ color: "var(--text-secondary)" }}>
+        {label}
+      </span>
+      <p
+        className="input h-11 min-h-[44px] flex items-center truncate select-text"
+        style={{ color: "var(--text-muted)", background: "color-mix(in srgb, var(--text-primary) 2%, transparent)" }}
+        title={value}
+      >
+        <span className={mono ? "font-mono text-[13px]" : "text-[13px]"}>{value || "—"}</span>
+      </p>
+    </div>
+  );
 }
 
 export default function SettingsPage() {
   const router = useRouter();
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [success, setSuccess] = useState("");
-  const [error, setError] = useState("");
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [theme, setTheme] = useState<Theme>("dark");
-  // Focus trap for the mobile menu drawer: Escape closes, Tab cycles inside.
-  const menuRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(menuRef, mobileMenuOpen, () => setMobileMenuOpen(false));
+  const authed = useAuthenticated();
+  const { theme, toggle } = useTheme();
+  const { showToast } = useToast();
 
-  // Settings state
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [userId, setUserId] = useState("");
-  const [modelName, setModelName] = useState("");
+  const [model, setModel] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
-  const [isApiKeySet, setIsApiKeySet] = useState(false);
+  const [apiKeySet, setApiKeySet] = useState(false);
+  const [providerModels, setProviderModels] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  // Debounced values for save (explicit Save button only — no auto-save,
-  // which previously fired an empty POST immediately after load)
-  const debouncedBaseUrl = useDebounce(baseUrl, 700);
-  const debouncedModelName = useDebounce(modelName, 700);
-  const debouncedApiKey = useDebounce(apiKey, 700);
-
-  // Auth redirect + settings fetch
   useEffect(() => {
-    if (!isAuthenticated()) {
-      router.replace("/auth/login");
-      return;
+    if (authed) return;
+    if (!isAuthenticated()) router.replace("/auth/login");
+  }, [authed, router]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await requestJson<SettingsResponse>("/api/settings");
+      setEmail(data.email ?? "");
+      setUserId(data.userId ?? "");
+      setModel(data.model ?? "");
+      setBaseUrl(data.baseUrl ?? "");
+      setApiKeySet(Boolean(data.apiKeySet));
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Unable to load settings");
+    } finally {
+      setLoading(false);
     }
-    (async () => {
-      try {
-        const res = await fetchApi("/api/settings");
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed to fetch settings");
-        const data = await res.json();
-        setEmail(data.email || "");
-        setUserId(data.userId || "");
-        setBaseUrl(data.baseUrl || "");
-        setModelName(data.model || "");
-        setIsApiKeySet(!!data.apiKeySet);
-      } catch (err: any) {
-        setError(err.message || "Failed to load settings");
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [router]);
-
-  useEffect(() => {
-    setTheme(getTheme());
+    // The provider list is a convenience; the form works without it.
+    try {
+      const models = await requestJson<ModelsResponse>("/api/settings/models");
+      setProviderModels(asArray<string>(models?.models));
+    } catch {
+      setProviderModels([]);
+    }
   }, []);
 
-  // Save only when the user presses Save.
-  const handleSave = useCallback(async () => {
+  useEffect(() => {
+    if (!authed) return;
+    void (async () => {
+      await load();
+    })();
+  }, [authed, load]);
+
+  const save = async () => {
     setSaving(true);
-    setError("");
+    setSaveError(null);
+    setSaved(false);
     try {
-      const payload: Record<string, string> = {
-        baseUrl: debouncedBaseUrl,
-        model: debouncedModelName,
-      };
-      if (debouncedApiKey) payload.apiKey = debouncedApiKey;
-      const res = await fetchApi("/api/settings", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || "Failed to save settings");
-      }
-      if (debouncedApiKey) {
-        setIsApiKeySet(true);
+      const payload: Record<string, string> = { model, baseUrl };
+      if (apiKey.trim()) payload.apiKey = apiKey.trim();
+      await requestJson<{ success: boolean }>("/api/settings", { method: "POST", body: JSON.stringify(payload) });
+      if (apiKey.trim()) {
+        setApiKeySet(true);
         setApiKey("");
       }
-      setSuccess("Settings saved");
-      setTimeout(() => setSuccess(""), 2000);
-    } catch (err: any) {
-      setError(err.message || "Failed to save settings");
+      setSaved(true);
+      showToast("Settings saved", "success");
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Unable to save settings");
     } finally {
       setSaving(false);
     }
-  }, [debouncedBaseUrl, debouncedModelName, debouncedApiKey]);
-
-  const handleLogout = async () => {
-    try {
-      await logout();
-    } finally {
-      router.push("/auth/login");
-    }
   };
 
-  const handleToggleTheme = () => {
-    const next = toggleTheme();
-    setTheme(next);
+  const signOut = async () => {
+    await logout();
+    router.replace("/auth/login");
   };
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-primary text-primary flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-accent-primary mx-auto mb-4" />
-          <p className="text-muted">Loading settings...</p>
-        </div>
-      </div>
-    );
-  }
+  const canSave = !loading && !saving && model.trim().length > 0 && baseUrl.trim().length > 0;
 
   return (
-    <div className="min-h-screen bg-primary text-primary">
-      <header className="border-b glass sticky top-0 z-50">
-        <div className="max-w-4xl mx-auto px-4 py-4">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-4">
-              <button onClick={() => router.push("/app/projects")} className="btn-ghost" aria-label="Go back">
-                ←
-              </button>
-              <h1 className="text-2xl font-bold">Settings</h1>
-            </div>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={handleToggleTheme}
-                aria-label={`Switch to ${theme === "light" ? "dark" : "light"} theme`}
-                className="btn-ghost"
-                title={`Switch to ${theme === "light" ? "dark" : "light"} theme`}
-              >
-                {theme === "light" ? <span aria-hidden="true">🌙</span> : <span aria-hidden="true">☀️</span>}
-              </button>
-              <button
-                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-                className="md:hidden btn-ghost"
-                aria-label="Toggle menu"
-              >
-                ☰
-              </button>
-            </div>
-          </div>
-        </div>
-      </header>
+    <div className="min-h-[100dvh] flex flex-col" style={{ background: "var(--bg-canvas)" }}>
+      <AppHeader
+        title="Settings"
+        links={[{ label: "Projects", href: "/app/projects" }]}
+        right={
+          <Link href="/app/projects" className="btn btn-ghost hidden sm:inline-flex px-3" style={{ color: "var(--text-muted)" }}>
+            <ArrowLeft size={14} aria-hidden="true" />
+            Projects
+          </Link>
+        }
+      />
 
-      <main className="max-w-4xl mx-auto px-4 py-8 space-y-6">
-        {/* Profile */}
-        <section className="card animate-fade-in-up">
-          <h2 className="text-lg font-semibold mb-4">Profile</h2>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-secondary text-sm mb-1">Email</label>
-              <input type="email" value={email} disabled readOnly className="input opacity-70" />
-            </div>
-            <div>
-              <label className="block text-secondary text-sm mb-1">User ID</label>
-              <input type="text" value={userId} disabled readOnly className="input opacity-70 font-mono text-xs" />
-            </div>
-          </div>
-        </section>
-
-        {/* NIM Configuration */}
-        <section className="card animate-fade-in-up" style={{ animationDelay: "60ms" }}>
-          <h2 className="text-lg font-semibold mb-4">NIM Configuration</h2>
-          <div className="space-y-5">
-            <div>
-              <label htmlFor="model" className="block text-secondary text-sm font-medium mb-2">Model</label>
-              <input
-                id="model"
-                type="text"
-                value={modelName}
-                onChange={(e) => setModelName(e.target.value)}
-                placeholder="e.g., meta/llama-3.1-405b-instruct"
-                className="input"
-              />
-              <p className="text-muted text-sm mt-1">NVIDIA NIM model used by the agent for this account.</p>
-            </div>
-            <div>
-              <label htmlFor="baseUrl" className="block text-secondary text-sm font-medium mb-2">Base URL</label>
-              <input
-                id="baseUrl"
-                type="text"
-                value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
-                placeholder="https://integrate.api.nvidia.com/v1"
-                className="input"
-              />
-              <p className="text-muted text-sm mt-1">OpenAI-compatible endpoint for NIM.</p>
-            </div>
-          </div>
-        </section>
-
-        {/* API Key */}
-        <section className="card animate-fade-in-up" style={{ animationDelay: "120ms" }}>
-          <h2 className="text-lg font-semibold mb-4">API Key</h2>
-          <p className="text-secondary mb-4 text-sm">
-            Your NVIDIA NIM API key is encrypted (AES-256-GCM) and stored on the server.
-            It is never sent back to the browser.
-          </p>
-          <label htmlFor="apiKey" className="block text-secondary text-sm font-medium mb-2">API Key</label>
-          <div className="flex gap-2">
-            <input
-              id="apiKey"
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder={isApiKeySet ? "•••••••••••••••• (configured)" : "Enter your NVIDIA NIM API key"}
-              className="input"
-              autoComplete="off"
+      <main id="main-content" className="flex-1">
+        <div className="max-w-[720px] mx-auto px-4 md:px-6 py-8 md:py-12 space-y-4">
+          {loadError ? (
+            <NoticeBar
+              tone="danger"
+              message={loadError}
+              action={
+                <button type="button" onClick={() => void load()} className="btn btn-ghost px-2 text-[12px]">
+                  Retry
+                </button>
+              }
             />
-            <button onClick={() => handleSave()} disabled={saving} className="btn-primary whitespace-nowrap">
-              {saving ? "Saving..." : "Save"}
-            </button>
-          </div>
-          <p className="text-muted text-sm mt-2">
-            {isApiKeySet ? (
-              <span style={{ color: "var(--success)" }}>✓ API key is configured</span>
-            ) : (
-              "Paste your key and press Save"
-            )}
-          </p>
-        </section>
+          ) : null}
 
-        {/* Session */}
-        <section className="card animate-fade-in-up" style={{ animationDelay: "180ms" }}>
-          <h2 className="text-lg font-semibold mb-4">Session</h2>
-          <button onClick={handleLogout} className="btn-danger">Logout</button>
-        </section>
+          {loading ? (
+            <div className="space-y-4" aria-label="Loading settings">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="rounded-lg border p-4 space-y-3" style={{ borderColor: "var(--border-color)" }}>
+                  <Skeleton style={{ height: 12, width: "22%" }} />
+                  <Skeleton style={{ height: 44 }} />
+                  <Skeleton style={{ height: 44, width: "70%" }} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <>
+              <Section title="Account" description="The account these workspaces belong to. Sign out to switch.">
+                <div className="grid sm:grid-cols-2 gap-3">
+                  <ReadField label="Email" value={email} />
+                  <ReadField label="User id" value={userId} mono />
+                </div>
+                <button type="button" onClick={() => void signOut()} className="btn btn-danger self-start px-4">
+                  <LogOut size={14} aria-hidden="true" />
+                  Sign out
+                </button>
+              </Section>
 
-        {/* Feedback */}
-        <div aria-live="polite">
-          {error && (
-            <div
-              className="p-4 rounded-lg text-sm animate-fade-in border"
-              role="alert"
-              style={{
-                background: "color-mix(in srgb, var(--danger) 10%, transparent)",
-                borderColor: "color-mix(in srgb, var(--danger) 40%, transparent)",
-                color: "var(--danger)",
-              }}
-            >
-              {error}
-            </div>
-          )}
-          {success && !error && (
-            <div
-              className="p-4 rounded-lg text-sm animate-fade-in border"
-              style={{
-                background: "color-mix(in srgb, var(--success) 10%, transparent)",
-                borderColor: "color-mix(in srgb, var(--success) 40%, transparent)",
-                color: "var(--success)",
-              }}
-            >
-              ✓ {success}
-            </div>
-          )}
-          {saving && !success && (
-            <div
-              className="p-4 rounded-lg text-sm animate-fade-in border"
-              style={{
-                background: "color-mix(in srgb, var(--warning) 10%, transparent)",
-                borderColor: "color-mix(in srgb, var(--warning) 40%, transparent)",
-                color: "var(--warning)",
-              }}
-            >
-              Saving…
-            </div>
+              <Section title="Appearance" description="Dark is the default; light is the alternative palette.">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[13px]" style={{ color: "var(--text-secondary)", fontWeight: 510 }}>
+                      {theme === "light" ? "Light" : "Dark"}
+                    </p>
+                    <p className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                      Applies to this browser and every page.
+                    </p>
+                  </div>
+                  <button type="button" onClick={toggle} className="btn btn-secondary px-4">
+                    Switch to {theme === "light" ? "dark" : "light"}
+                  </button>
+                </div>
+              </Section>
+
+              <Section
+                title="Model"
+                description="The model the agent uses for this account, and the OpenAI-compatible endpoint it is served from."
+              >
+                <div>
+                  <label htmlFor="model" className="block text-[12px] mb-1.5" style={{ color: "var(--text-secondary)" }}>
+                    Model id
+                  </label>
+                  <input
+                    id="model"
+                    list="provider-models"
+                    value={model}
+                    onChange={(event) => setModel(event.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="input h-11 min-h-[44px] font-mono text-[13px]"
+                  />
+                  <datalist id="provider-models">
+                    {providerModels.map((entry) => (
+                      <option key={entry} value={entry} />
+                    ))}
+                  </datalist>
+                  <p className="text-[11px] mt-1.5" style={{ color: "var(--text-muted)" }}>
+                    Shown in the workspace as “{modelLabel(model)}”.
+                    {providerModels.length > 0 ? ` ${providerModels.length} models offered by the endpoint.` : ""}
+                  </p>
+                </div>
+                <div>
+                  <label htmlFor="baseUrl" className="block text-[12px] mb-1.5" style={{ color: "var(--text-secondary)" }}>
+                    Base URL
+                  </label>
+                  <input
+                    id="baseUrl"
+                    value={baseUrl}
+                    onChange={(event) => setBaseUrl(event.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="input h-11 min-h-[44px] font-mono text-[13px]"
+                    placeholder="https://example.com/v1"
+                  />
+                </div>
+              </Section>
+
+              <Section
+                title="Provider key"
+                description="Encrypted at rest on the API and never sent back to the browser. Leave blank to keep the stored key."
+              >
+                <div>
+                  <label htmlFor="apiKey" className="block text-[12px] mb-1.5" style={{ color: "var(--text-secondary)" }}>
+                    API key
+                  </label>
+                  <input
+                    id="apiKey"
+                    type="password"
+                    value={apiKey}
+                    onChange={(event) => setApiKey(event.target.value)}
+                    autoComplete="off"
+                    placeholder={apiKeySet ? "Configured — paste a new key to replace it" : "Paste your provider key"}
+                    className="input h-11 min-h-[44px] font-mono text-[13px]"
+                  />
+                  {apiKeySet && !apiKey ? (
+                    <p className="text-[11px] mt-1.5" style={{ color: "var(--success)" }}>
+                      A key is stored for this account.
+                    </p>
+                  ) : null}
+                </div>
+              </Section>
+
+              <div className="rounded-lg border p-4 flex flex-col sm:flex-row sm:items-center gap-3" style={{ borderColor: "var(--border-color)", background: "var(--bg-panel)" }}>
+                <div className="flex-1 min-w-0" aria-live="polite">
+                  {saveError ? (
+                    <p className="text-[12px]" style={{ color: "var(--danger)" }}>
+                      {saveError}
+                    </p>
+                  ) : saved ? (
+                    <p className="text-[12px]" style={{ color: "var(--success)" }}>
+                      Saved.
+                    </p>
+                  ) : (
+                    <p className="text-[12px]" style={{ color: "var(--text-muted)" }}>
+                      Changes apply to the next run.
+                    </p>
+                  )}
+                </div>
+                <button type="button" onClick={() => void save()} disabled={!canSave} className="btn btn-primary px-5">
+                  {saving ? "Saving…" : "Save changes"}
+                </button>
+              </div>
+
+              {!email && !loadError ? (
+                <EmptyState title="No settings returned" hint="The account may not be provisioned yet. Retry from the banner above." />
+              ) : null}
+            </>
           )}
         </div>
-
-        {mobileMenuOpen && (
-          <div className="fixed inset-0 z-50 md:hidden" onClick={() => setMobileMenuOpen(false)}>
-            <div className="absolute inset-0" style={{ background: "rgba(0, 0, 0, 0.5)" }} aria-hidden="true" />
-            <div ref={menuRef} className="absolute right-0 top-0 h-full w-64 bg-primary border-l p-4">
-              <button onClick={handleLogout} className="btn-danger w-full">Logout</button>
-            </div>
-          </div>
-        )}
       </main>
     </div>
   );
