@@ -765,6 +765,10 @@ export class ModalRuntimeService implements RuntimeService {
   }
 
   async purgeWorkspace(projectId: string): Promise<void> {
+    // Refuse a malformed id before provisioning anything: this call mounts the
+    // WHOLE shared Volume so it can remove one project directory, and resolving
+    // that target to the mount root would delete every project's files.
+    const relativeTarget = purgeTarget(projectId);
     const [app, image, volume] = await Promise.all([
       this.provider.app(),
       this.provider.image(),
@@ -778,11 +782,12 @@ export class ModalRuntimeService implements RuntimeService {
       volumes: { [VOLUME_ROOT]: volume },
       tags: { "dai.project": projectId, "dai.purpose": "purge" },
     });
-    // The target is inside a mount of the WHOLE shared Volume, so a malformed
-    // project id must never resolve to the mount root: that would delete every
-    // project's files, not just this one.
-    const target = purgeTarget(projectId);
     try {
+      // Absolute, against the mount point — the same way every other Volume
+      // path here is built. A relative target would resolve against the
+      // Sandbox's default working directory, so `test -d` would report
+      // "absent" and deletion would silently reclaim nothing.
+      const target = `${VOLUME_ROOT}/${relativeTarget}`;
       const removed = await sandbox.exec(
         ["/bin/bash", "-c", 'test -d "$1" && rm -rf -- "$1" && echo gone || echo absent', "purge", target],
         { timeoutMs: 60_000 }
@@ -853,7 +858,11 @@ export class ModalRuntimeService implements RuntimeService {
  */
 export function purgeTarget(projectId: string): string {
   const sub = volumeSubPath(projectId);
-  const safe = /^projects\/[^./][A-Za-z0-9._-]{0,63}$/.test(sub) && !sub.includes("..");
+  // An explicit allowlist, not "anything but dot and slash": the first
+  // character of a permissive class can be a space or a dash, which reaches
+  // the shell as part of a real path argument. Project ids are UUIDs, so this
+  // rejects nothing legitimate.
+  const safe = /^projects\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(sub) && !sub.includes("..");
   if (!safe) {
     throw new RuntimeOperationError(
       `Refusing to remove workspace path "${sub}": it is not a single project directory`,

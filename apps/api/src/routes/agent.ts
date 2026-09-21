@@ -6,7 +6,7 @@ import {
   listMessages,
   addMessage,
 } from "@dai/db";
-import { createAgentRun, insertActivityEvent, updateAgentRun } from "@dai/db";
+import { createAgentRun, getAgentRun, insertActivityEvent, updateAgentRun } from "@dai/db";
 import { NIMClient, type ChatMessage } from "@dai/nim";
 import { requireAuth, getAuthUser } from "../lib/auth.js";
 import { resolveNimConfig } from "../lib/nim-config.js";
@@ -313,13 +313,18 @@ router.post("/:id/agent/stop", async (req: Request, res: Response) => {
       res.status(400).json({ error: "runId required" });
       return;
     }
+    // The run must belong to this project. A caller-supplied identifier alone
+    // would let anyone cancel another user's run by guessing its id.
+    const run = await getAgentRun(runId);
+    if (!run || run.projectId !== project.id) {
+      res.status(404).json({ error: "Run not found for this project" });
+      return;
+    }
+    // Only the request is recorded here. Writing `cancelled` now would claim a
+    // result the loop has not produced yet, and would lose to the loop's own
+    // final write whenever the last step finished first.
     registerCancellation(runId);
-    await updateAgentRun(runId, {
-      state: "paused",
-      outcome: "cancelled",
-      stopReason: "Stopped by you.",
-    });
-    res.json({ success: isCancelled(runId), runId });
+    res.json({ success: true, runId, stopping: isCancelled(runId) });
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : "Unable to stop the run" });
   }
