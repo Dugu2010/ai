@@ -149,6 +149,11 @@ export async function createProject(
     runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
     legacySandboxId: row.legacy_sandbox_id ?? null,
     runtimeMigrationStatus: row.runtime_migration_status ?? null,
+    workspaceBytes:
+      row.workspace_bytes === null || row.workspace_bytes === undefined
+        ? null
+        : Number(row.workspace_bytes),
+    workspaceMeasuredAt: row.workspace_measured_at ?? null,
     sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,
@@ -185,6 +190,11 @@ export async function getProject(id: string): Promise<Project | null> {
     runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
     legacySandboxId: row.legacy_sandbox_id ?? null,
     runtimeMigrationStatus: row.runtime_migration_status ?? null,
+    workspaceBytes:
+      row.workspace_bytes === null || row.workspace_bytes === undefined
+        ? null
+        : Number(row.workspace_bytes),
+    workspaceMeasuredAt: row.workspace_measured_at ?? null,
     sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,
@@ -221,6 +231,11 @@ export async function getProjectByUser(id: string, userId: string): Promise<Proj
     runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
     legacySandboxId: row.legacy_sandbox_id ?? null,
     runtimeMigrationStatus: row.runtime_migration_status ?? null,
+    workspaceBytes:
+      row.workspace_bytes === null || row.workspace_bytes === undefined
+        ? null
+        : Number(row.workspace_bytes),
+    workspaceMeasuredAt: row.workspace_measured_at ?? null,
     sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,
@@ -255,6 +270,11 @@ export async function listProjects(userId: string): Promise<Project[]> {
     runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
     legacySandboxId: row.legacy_sandbox_id ?? null,
     runtimeMigrationStatus: row.runtime_migration_status ?? null,
+    workspaceBytes:
+      row.workspace_bytes === null || row.workspace_bytes === undefined
+        ? null
+        : Number(row.workspace_bytes),
+    workspaceMeasuredAt: row.workspace_measured_at ?? null,
     sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,
@@ -462,6 +482,8 @@ export async function updateProject(
     runtimeVolumeSubPath?: string | null;
     legacySandboxId?: string | null;
     runtimeMigrationStatus?: string | null;
+    workspaceBytes?: number | null;
+    workspaceMeasuredAt?: string | null;
     sandboxSlug?: string | null;
     vmId?: string | null;
     vmSlug?: string | null;
@@ -491,6 +513,8 @@ export async function updateProject(
   if (updates.runtimeVolumeSubPath !== undefined) add("runtime_volume_subpath", updates.runtimeVolumeSubPath);
   if (updates.legacySandboxId !== undefined) add("legacy_sandbox_id", updates.legacySandboxId);
   if (updates.runtimeMigrationStatus !== undefined) add("runtime_migration_status", updates.runtimeMigrationStatus);
+  if (updates.workspaceBytes !== undefined) add("workspace_bytes", updates.workspaceBytes);
+  if (updates.workspaceMeasuredAt !== undefined) add("workspace_measured_at", updates.workspaceMeasuredAt);
   if (updates.sandboxSlug !== undefined) add("sandbox_slug", updates.sandboxSlug);
   if (updates.vmId !== undefined) add("vm_id", updates.vmId);
   if (updates.vmSlug !== undefined) add("vm_slug", updates.vmSlug);
@@ -517,6 +541,11 @@ export async function updateProject(
     runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
     legacySandboxId: row.legacy_sandbox_id ?? null,
     runtimeMigrationStatus: row.runtime_migration_status ?? null,
+    workspaceBytes:
+      row.workspace_bytes === null || row.workspace_bytes === undefined
+        ? null
+        : Number(row.workspace_bytes),
+    workspaceMeasuredAt: row.workspace_measured_at ?? null,
     sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,

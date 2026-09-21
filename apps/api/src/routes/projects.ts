@@ -6,6 +6,7 @@ import {
   duplicateProjectWorkspace,
   isRuntimeConfigured,
   purgeRuntimeWorkspace,
+  recordWorkspaceUsage,
   runtimeConfig,
   terminateRuntime,
 } from "../lib/runtime.js";
@@ -27,6 +28,8 @@ router.use(requireAuth);
 export async function provisionSandbox(project: { id: string; slug: string; name: string }) {
   const { workspace } = await acquireWorkspace(project.id);
   const config = runtimeConfig();
+  // Measured on the Sandbox we already opened to provision the project.
+  await recordWorkspaceUsage(workspace, project.id).catch(() => null);
   workspace.close();
 
   const updated = await updateProject(project.id, {
@@ -213,6 +216,8 @@ router.delete("/:id", async (req: Request, res: Response) => {
     } catch (purgeError: any) {
       console.warn("[projects:DELETE] runtime purge failed:", purgeError.message);
     }
+    // Conversations, messages, runs, timeline events and checkpoints all cascade
+    // from the project row; deleting explicitly would only hide a FK mistake.
     await deleteProject(project.id);
     res.json({ success: true });
   } catch (error: any) {

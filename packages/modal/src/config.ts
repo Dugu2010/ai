@@ -51,6 +51,15 @@ export interface ModalRuntimeConfig {
   devServerReadyTimeoutMs: number;
   /** Ports exposed as TLS tunnels; also the dev-server candidates. */
   previewPorts: number[];
+  /**
+   * Application-enforced ceiling on one project's stored bytes.
+   *
+   * Modal has no per-project quota knob: a Volume is a single namespace with a
+   * documented inode ceiling and no stated storage cap, and a subPath is just a
+   * directory. So DAI measures and enforces this itself; 50 GiB is the product
+   * default, not a provider guarantee.
+   */
+  maxProjectWorkspaceBytes: number;
   /** Null = provider default outbound access. Set true to deny all egress. */
   blockNetwork: boolean;
   outboundDomainAllowlist: string[];
@@ -73,6 +82,7 @@ export const DEFAULT_CONFIG: ModalRuntimeConfig = {
   execTimeoutMs: wholeSeconds(120_000),
   devServerReadyTimeoutMs: wholeSeconds(60_000),
   previewPorts: [3_000, 5_173, 8_080],
+  maxProjectWorkspaceBytes: 50 * 1024 * 1024 * 1024,
   blockNetwork: false,
   outboundDomainAllowlist: [],
 };
@@ -95,6 +105,11 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): ModalRuntim
       intFromEnv(env, "MODAL_DEV_SERVER_READY_TIMEOUT_MS", DEFAULT_CONFIG.devServerReadyTimeoutMs)
     ),
     previewPorts: listFromEnv(env, "MODAL_PREVIEW_PORTS", DEFAULT_CONFIG.previewPorts),
+    maxProjectWorkspaceBytes: intFromEnv(
+      env,
+      "MAX_PROJECT_WORKSPACE_BYTES",
+      DEFAULT_CONFIG.maxProjectWorkspaceBytes
+    ),
     blockNetwork: env.MODAL_BLOCK_NETWORK === "true",
     outboundDomainAllowlist: (env.MODAL_OUTBOUND_DOMAIN_ALLOWLIST ?? "")
       .split(",")

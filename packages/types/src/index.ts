@@ -46,6 +46,10 @@ export interface Project {
   legacySandboxId: string | null;
   /** Outcome of the CodeSandbox -> Modal workspace migration, if it ran. */
   runtimeMigrationStatus: string | null;
+  /** Measured durable bytes for this project's workspace, or null if unknown. */
+  workspaceBytes: number | null;
+  /** When workspaceBytes was last measured by a real du against the Volume. */
+  workspaceMeasuredAt: string | null;
   /** Deprecated CodeSandbox addressing slug. Read-only legacy data. */
   sandboxSlug: string | null;
   /** Deprecated Freestyle VM id. Read-only legacy data. */

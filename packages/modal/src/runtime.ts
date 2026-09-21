@@ -466,6 +466,24 @@ export class ModalWorkspace implements Workspace {
     }
   }
 
+  /**
+   * Durable bytes currently under the mounted workspace, measured with the
+   * Sandbox that is already attached.
+   *
+   * Using the live handle is deliberate: starting a separate maintenance
+   * Sandbox to ask this question would cost more compute than the answer is
+   * worth, which is the opposite of why we are asking.
+   */
+  async workspaceUsageBytes(): Promise<number | null> {
+    const proc = await this.runArgv(
+      ["/bin/bash", "-c", 'du -sb -- "$1" 2>/dev/null | cut -f1', "du", this.config.workspacePath],
+      { timeoutMs: 30_000 }
+    );
+    if (proc.exitCode !== 0) return null;
+    const bytes = Number.parseInt(proc.stdout.trim(), 10);
+    return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
+  }
+
   async isAlive(): Promise<boolean> {
     try {
       return (await this.sandbox.poll()) === null;
@@ -760,11 +778,23 @@ export class ModalRuntimeService implements RuntimeService {
       volumes: { [VOLUME_ROOT]: volume },
       tags: { "dai.project": projectId, "dai.purpose": "purge" },
     });
+    // The target is inside a mount of the WHOLE shared Volume, so a malformed
+    // project id must never resolve to the mount root: that would delete every
+    // project's files, not just this one.
+    const target = purgeTarget(projectId);
     try {
-      await sandbox.exec(
-        ["/bin/bash", "-c", 'rm -rf -- "$1"', "purge", volumeSubPath(projectId)],
+      const removed = await sandbox.exec(
+        ["/bin/bash", "-c", 'test -d "$1" && rm -rf -- "$1" && echo gone || echo absent', "purge", target],
         { timeoutMs: 60_000 }
       );
+      const code = await removed.wait();
+      const out = (await removed.stdout.readText()).trim();
+      if (code !== 0 || (out !== "gone" && out !== "absent")) {
+        throw new RuntimeOperationError(
+          `Workspace removal did not complete cleanly (exit ${code})`,
+          "rejected"
+        );
+      }
     } finally {
       try {
         await sandbox.terminate({ wait: true });
@@ -773,4 +803,62 @@ export class ModalRuntimeService implements RuntimeService {
       }
     }
   }
+
+  /**
+   * Durable bytes a project currently occupies in the shared Volume.
+   *
+   * Modal exposes no per-project quota: a Volume is one namespace with a
+   * documented inode ceiling and no storage cap, and subPaths are plain
+   * directories. So the only way to hold a project to a budget is to measure it
+   * and enforce the limit ourselves.
+   */
+  async measureWorkspaceBytes(projectId: string): Promise<number | null> {
+    const [app, image, volume] = await Promise.all([
+      this.provider.app(),
+      this.provider.image(),
+      this.provider.volume(),
+    ]);
+    const sandbox = await this.provider.sandboxes.create(app, image, {
+      cpu: 0.25,
+      memoryMiB: 256,
+      timeoutMs: ceilSecond(120_000),
+      volumes: { [VOLUME_ROOT]: volume },
+      tags: { "dai.project": projectId, "dai.purpose": "measure" },
+    });
+    try {
+      const target = volumeSubPath(projectId);
+      const proc = await sandbox.exec(
+        ["/bin/bash", "-c", 'du -sb -- "$1" 2>/dev/null | cut -f1', "measure", target],
+        { timeoutMs: 60_000 }
+      );
+      const stdout = (await proc.stdout.readText()).trim();
+      await proc.wait();
+      const bytes = Number.parseInt(stdout, 10);
+      return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
+    } finally {
+      try {
+        await sandbox.terminate({ wait: true });
+      } catch {
+        // Already finished.
+      }
+    }
+  }
+}
+
+/**
+ * The purge target, validated.
+ *
+ * Must be exactly one directory level under `projects/`: not empty, not `.`,
+ * not a traversal, and never the shared mount root.
+ */
+export function purgeTarget(projectId: string): string {
+  const sub = volumeSubPath(projectId);
+  const safe = /^projects\/[^./][A-Za-z0-9._-]{0,63}$/.test(sub) && !sub.includes("..");
+  if (!safe) {
+    throw new RuntimeOperationError(
+      `Refusing to remove workspace path "${sub}": it is not a single project directory`,
+      "invalid"
+    );
+  }
+  return sub;
 }

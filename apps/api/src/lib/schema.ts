@@ -56,6 +56,10 @@ export async function ensureSchema(): Promise<void> {
     -- Migration outcome per project: modal_workspace_ready | modal_files_imported |
     -- modal_awaiting_import | modal_import_failed. Written by scripts/migrate-runtime.ts.
     ALTER TABLE projects ADD COLUMN IF NOT EXISTS runtime_migration_status TEXT;
+    -- Storage accounting. Modal has no per-project quota, so DAI measures the
+    -- project's subPath and enforces MAX_PROJECT_WORKSPACE_BYTES itself.
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS workspace_bytes BIGINT;
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS workspace_measured_at TIMESTAMPTZ;
 
     CREATE INDEX IF NOT EXISTS idx_projects_runtime_provider ON projects(runtime_provider);
 

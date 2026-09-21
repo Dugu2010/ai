@@ -13,7 +13,9 @@ import { resolveNimConfig } from "../lib/nim-config.js";
 import { validatePath } from "../lib/validation.js";
 import {
   acquireWorkspace,
+  assertWithinStorageQuota,
   isRuntimeConfigured,
+  recordWorkspaceUsage,
   releaseWorkspace,
   runtimeDefaultPort,
 } from "../lib/runtime.js";
@@ -97,6 +99,9 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       return;
     }
     try {
+      // Free check first: a project already over its storage allowance should
+      // not pay for a Sandbox to discover that again.
+      await assertWithinStorageQuota(project.id);
       const acquired = await acquireWorkspace(project.id);
       workspace = acquired.workspace;
     } catch (error) {
@@ -188,6 +193,10 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
         });
       },
     });
+
+    // Reuse the Sandbox this run already holds to take the next measurement, so
+    // the quota stays honest without an extra activation later.
+    await recordWorkspaceUsage(workspace, project.id).catch(() => null);
 
     if (result.contentStreamed && result.content) {
       writeSSE(res, "assistant_delta", { text: result.content });

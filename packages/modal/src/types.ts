@@ -112,6 +112,8 @@ export interface Workspace {
   startDevServer(opts: { command: string; port: number; cwd?: string }): Promise<DevServerHandle>;
   stopDevServer(port: number): Promise<void>;
   getPreviewUrl(port: number): Promise<PreviewTarget>;
+  /** Durable bytes under the mounted workspace, measured on the live Sandbox. */
+  workspaceUsageBytes(): Promise<number | null>;
   /** `false` once the provider reports the Sandbox has finished. */
   isAlive(): Promise<boolean>;
   terminate(): Promise<void>;

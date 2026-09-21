@@ -148,6 +148,54 @@ export async function duplicateProjectWorkspace(
   await runtimeService().duplicateWorkspace(sourceProjectId, targetProjectId);
 }
 
+/**
+ * Refuse a run that has already outgrown its storage allowance.
+ *
+ * The check reads only Postgres, so enforcing the quota never costs compute.
+ * The measurement it guards comes from a `du` run on a Sandbox that was already
+ * attached for other reasons.
+ */
+export async function assertWithinStorageQuota(projectId: string): Promise<void> {
+  const project = await getProject(projectId);
+  if (!project) {
+    throw new RuntimeOperationError(`Project ${projectId} no longer exists`, "not_found");
+  }
+  const limit = runtimeConfig().maxProjectWorkspaceBytes;
+  const used = project.workspaceBytes;
+  if (used !== null && used >= limit) {
+    throw new RuntimeOperationError(
+      `This project's workspace is at its storage limit (${formatBytes(used)} of ${formatBytes(limit)}). ` +
+        "Delete files or remove the project before running more work.",
+      "too_large"
+    );
+  }
+}
+
+/** Store a usage measurement taken on the Sandbox this run already holds. */
+export async function recordWorkspaceUsage(
+  workspace: Workspace,
+  projectId: string
+): Promise<number | null> {
+  const bytes = await workspace.workspaceUsageBytes();
+  if (bytes === null) return null;
+  await updateProject(projectId, {
+    workspaceBytes: bytes,
+    workspaceMeasuredAt: new Date().toISOString(),
+  });
+  return bytes;
+}
+
+export function formatBytes(value: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
 /** Permanently discard a project's durable workspace. Destructive. */
 export async function purgeRuntimeWorkspace(projectId: string): Promise<void> {
   if (!isRuntimeConfigured()) return;

@@ -1,5 +1,5 @@
 export { ModalProvider, type ProviderDeps } from "./provider.js";
-export { ModalRuntimeService, ModalWorkspace } from "./runtime.js";
+export { ModalRuntimeService, ModalWorkspace, purgeTarget } from "./runtime.js";
 export {
   configFromEnv,
   DEFAULT_CONFIG,
