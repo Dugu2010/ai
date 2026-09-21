@@ -1,51 +1,40 @@
 import { Router, Request, Response } from "express";
 import { listProjects, createProject, getProjectByUser, updateProject, deleteProject } from "@dai/db";
 import { requireAuth, getAuthUser } from "../lib/auth.js";
-import { CODESANDBOX_API_KEY, IDLE_TIMEOUT_SECONDS } from "../lib/env.js";
-import { CodeSandboxClient, VMTier } from "@dai/codesandbox";
+import {
+  acquireWorkspace,
+  duplicateProjectWorkspace,
+  isRuntimeConfigured,
+  purgeRuntimeWorkspace,
+  runtimeConfig,
+  terminateRuntime,
+} from "../lib/runtime.js";
 import { MAX_REQUEST_BODY_SIZE } from "../lib/validation.js";
 import { requestSandboxSlot } from "../lib/sandbox-queue.js";
+import { volumeSubPath } from "@dai/modal";
 
 const router = Router();
 router.use(requireAuth);
 
-function codesandbox(): CodeSandboxClient {
-  const apiKey = CODESANDBOX_API_KEY();
-  if (!apiKey) {
-    throw new Error("CODESANDBOX_API_KEY is not configured on the backend");
-  }
-  return new CodeSandboxClient(apiKey);
-}
-
-function sandboxSlugFor(slug: string, projectId: string, attempt = 0): string {
-  const short = projectId.replace(/-/g, "").slice(0, 8);
-  const suffix = attempt > 0 ? `-${attempt}` : "";
-  return `dai-${slug}-${short}${suffix}`.slice(0, 63);
-}
-
-// Template built via `npx @codesandbox/sdk build ./sandbox --ports 3000`
-// Rebuild this template when the base project changes.
-const DAI_TEMPLATE_ID = "k8dsq1";
-
-export async function provisionSandbox(project: { id: string; slug: string; name: string }, attempt = 0) {
-  const client = codesandbox();
-  const slug = sandboxSlugFor(project.slug, project.id, attempt);
-  const { sandboxId, editorUrl } = await client.createSandbox(DAI_TEMPLATE_ID, {
-    vmTier: VMTier.Micro,
-    hibernationTimeoutSeconds: IDLE_TIMEOUT_SECONDS(),
-    automaticWakeupConfig: { http: true, websocket: false },
-    privacy: "public",
-  });
-  const previewUrl = editorUrl;
+/**
+ * Bring a project's runtime up.
+ *
+ * The durable part is the per-project subPath of the shared workspace Volume,
+ * which needs no compute; the Sandbox attached here is what makes the project
+ * immediately usable (files, preview) and Modal's idleTimeoutMs reclaims it
+ * when the developer walks away.
+ */
+export async function provisionSandbox(project: { id: string; slug: string; name: string }) {
+  const { workspace } = await acquireWorkspace(project.id);
+  const config = runtimeConfig();
+  workspace.close();
 
   const updated = await updateProject(project.id, {
-    sandboxId,
-    sandboxSlug: slug,
+    runtimeVolumeSubPath: volumeSubPath(project.id),
     status: "ready",
-    previewUrl,
     lastError: null,
   });
-  return { updated, sandbox: { sandboxId, editorUrl } };
+  return { updated, sandbox: { sandboxId: workspace.sandboxId, previewPorts: config.previewPorts } };
 }
 
 router.get("/", async (req: Request, res: Response) => {
@@ -82,11 +71,15 @@ router.post("/", async (req: Request, res: Response) => {
 
     const project = await createProject(user.userId, { slug, name, description });
 
-    if (!CODESANDBOX_API_KEY()) {
+    if (!isRuntimeConfigured()) {
       await updateProject(project.id, {
-        lastError: "CODESANDBOX_API_KEY not configured on backend",
+        lastError: "MODAL_TOKEN_ID/MODAL_TOKEN_SECRET not configured on backend",
       });
-      res.status(201).json({ ...project, status: "provisioning", lastError: "CODESANDBOX_API_KEY not configured on backend" });
+      res.status(201).json({
+        ...project,
+        status: "provisioning",
+        lastError: "MODAL_TOKEN_ID/MODAL_TOKEN_SECRET not configured on backend",
+      });
       return;
     }
 
@@ -114,6 +107,12 @@ router.post("/", async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Re-attach compute for a project whose Sandbox went away.
+ *
+ * Modal cannot resume a finished Sandbox, so this deliberately does not try:
+ * the workspace Volume still holds every file and a new Sandbox mounts it.
+ */
 router.post("/:id/reprovision", async (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
@@ -122,22 +121,19 @@ router.post("/:id/reprovision", async (req: Request, res: Response) => {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    if (!CODESANDBOX_API_KEY()) {
-      res.status(503).json({ error: "CODESANDBOX_API_KEY is not configured on the backend" });
+    if (!isRuntimeConfigured()) {
+      res.status(503).json({ error: "Modal credentials are not configured on the backend" });
       return;
     }
 
     if (project.sandboxId) {
-      await codesandbox().deleteSandbox(project.sandboxId);
+      await terminateRuntime(project.id);
     }
-
-    const attemptMatch = /\-(\d+)$/.exec(project.sandboxSlug || "");
-    const attempt = attemptMatch ? parseInt(attemptMatch[1]!, 10) + 1 : 0;
-    const { updated } = await provisionSandbox(project, attempt);
+    const { updated } = await provisionSandbox(project);
     res.json(updated);
   } catch (error: any) {
     console.error("[projects:reprovision]", error.message);
-    res.status(500).json({ error: error.message });
+    res.status(error.statusCode ?? 500).json({ error: error.message });
   }
 });
 
@@ -156,6 +152,12 @@ router.get("/:id", async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Fork a project by copying its durable workspace into a new project subPath.
+ *
+ * The copy is server-side inside the Volume, so neither the source nor the
+ * target needs a running Sandbox and no file bytes cross the control plane.
+ */
 router.post("/:id/fork", async (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
@@ -164,23 +166,10 @@ router.post("/:id/fork", async (req: Request, res: Response) => {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    if (!CODESANDBOX_API_KEY()) {
-      res.status(503).json({ error: "CODESANDBOX_API_KEY is not configured on the backend" });
+    if (!isRuntimeConfigured()) {
+      res.status(503).json({ error: "Modal credentials are not configured on the backend" });
       return;
     }
-
-    if (!project.sandboxId) {
-      res.status(409).json({ error: "Project sandbox is not provisioned yet" });
-      return;
-    }
-
-    // Fork safety (Item 8): CodeSandboxClient.forkSandbox resumes + hibernates
-    // the source sandbox first, then forks with the documented
-    // sdk.sandboxes.create({ id }) form. For a hibernated parent the fork takes
-    // 1-3s; forking a RUNNING parent would be a limited, slow "Live Fork".
-    // Ref: https://codesandbox.stream/docs/sdk/create + /resume
-    const client = codesandbox();
-    const forkResult = await client.forkSandbox(project.sandboxId);
 
     const newProject = await createProject(user.userId, {
       slug: `${project.slug}-fork`,
@@ -188,16 +177,24 @@ router.post("/:id/fork", async (req: Request, res: Response) => {
       description: project.description ?? undefined,
     });
 
-    await updateProject(newProject.id, {
-      sandboxId: forkResult.sandboxId,
-      status: "ready",
-      previewUrl: forkResult.editorUrl,
+    try {
+      await duplicateProjectWorkspace(project.id, newProject.id);
+    } catch (copyError: any) {
+      // Never leave a half-created fork behind after a failed copy.
+      await deleteProject(newProject.id);
+      throw copyError;
+    }
+
+    const updated = await updateProject(newProject.id, {
+      runtimeProvider: "modal",
+      runtimeVolumeSubPath: volumeSubPath(newProject.id),
+      status: "provisioning",
     });
 
-    res.json({ ...newProject, previewUrl: forkResult.editorUrl, sandboxId: forkResult.sandboxId });
+    res.json(updated);
   } catch (error: any) {
     console.error("[projects:fork]", error.message);
-    res.status(500).json({ error: error.message });
+    res.status(error.statusCode ?? 500).json({ error: error.message });
   }
 });
 
@@ -209,12 +206,12 @@ router.delete("/:id", async (req: Request, res: Response) => {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    if (project.sandboxId && CODESANDBOX_API_KEY()) {
-      try {
-        await codesandbox().deleteSandbox(project.sandboxId);
-      } catch (sandboxError: any) {
-        console.warn("[projects:DELETE] Sandbox deletion failed:", sandboxError.message);
-      }
+    // Terminate compute first, then discard the durable workspace. Purging is
+    // best-effort: losing it must not strand the user on a failed deletion.
+    try {
+      await purgeRuntimeWorkspace(project.id);
+    } catch (purgeError: any) {
+      console.warn("[projects:DELETE] runtime purge failed:", purgeError.message);
     }
     await deleteProject(project.id);
     res.json({ success: true });

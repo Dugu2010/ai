@@ -29,16 +29,31 @@ export interface Project {
   name: string;
   description: string | null;
   userId: UUID;
-  /** CodeSandbox sandbox id backing this project, once provisioned. */
+  /**
+   * Live Modal Sandbox id backing this project, once provisioned. The field is
+   * named `sandboxId` because it is part of the public API contract; Postgres
+   * remains the authoritative project-to-runtime mapping.
+   */
   sandboxId: string | null;
-  /** CodeSandbox slug used to address the sandbox (e.g. `dai-<slug>`). */
+  /** Which runtime owns this project's workspace: "modal" once provisioned. */
+  runtimeProvider: string | null;
+  /** Per-project subPath of the shared workspace Volume, mounted at /workspace. */
+  runtimeVolumeSubPath: string | null;
+  /**
+   * Pre-Modal provider identifier, retained for traceability after the runtime
+   * migration. Never used to address a live runtime.
+   */
+  legacySandboxId: string | null;
+  /** Outcome of the CodeSandbox -> Modal workspace migration, if it ran. */
+  runtimeMigrationStatus: string | null;
+  /** Deprecated CodeSandbox addressing slug. Read-only legacy data. */
   sandboxSlug: string | null;
-  /** Freestyle VM id backing this project, once provisioned. */
+  /** Deprecated Freestyle VM id. Read-only legacy data. */
   vmId: string | null;
-  /** Freestyle slug used to address the VM (e.g. `dai-<slug>`). */
+  /** Deprecated Freestyle VM slug. Read-only legacy data. */
   vmSlug: string | null;
   status: ProjectStatus;
-  /** The `<slug>.csb.app` domain routed to the dev server. */
+  /** Deprecated provider preview hostname. Modal previews are tunnel URLs. */
   previewDomain: string | null;
   previewPort: number | null;
   /** Public HTTPS URL of the live preview, if routed. */
@@ -47,13 +62,13 @@ export interface Project {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
-  /** When the sandbox was last accessed for cold-storage warning (>7 days). */
+  /** When the runtime was last used, for cold-storage style warnings (>7 days). */
   lastAccessedAt: string | null;
-  /** Whether the sandbox is currently hibernated (for preview proxy). */
+  /** True when no live Sandbox is attached; the Volume itself always persists. */
   isHibernated: boolean;
-  /** Sandbox bootup type on last resume (RUNNING | CLEAN | RESUME | FORK). Matches Sandbox.bootupType in @codesandbox/sdk. */
+  /** Provider-neutral boot classification kept for the UI: "CLEAN" new, "RESUME" reattached. */
   bootupType: "CLEAN" | "RESUME" | "RUNNING" | "FORK" | null;
-  /** Whether sandbox agent version is up to date. */
+  /** Reserved for a future runtime-update prompt; the image runtime is always current. */
   isUpToDate: boolean | null;
 }
 

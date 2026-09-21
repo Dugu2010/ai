@@ -2,7 +2,6 @@ import "dotenv/config";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import { ensureSchema } from "./lib/schema.js";
-import { CODESANDBOX_API_KEY } from "./lib/env.js";
 import authRoutes from "./routes/auth.js";
 import projectRoutes from "./routes/projects.js";
 import agentRoutes from "./routes/agent.js";
@@ -145,10 +144,14 @@ async function startQueueWorker(): Promise<void> {
 
   registerSandboxJobHandler("resume", async (job) => {
     const project = await getProject(job.projectId);
-    if (!project || !project.sandboxId) return;
-    const { CodeSandboxClient } = await import("@dai/codesandbox");
-    const client = new CodeSandboxClient(CODESANDBOX_API_KEY());
-    await client.resumeSandbox(project.sandboxId);
+    if (!project) return;
+    // "Resume" is a queue-era name for what Modal calls acquire: reattach to the
+    // stored Sandbox if it is still running, otherwise mount a new one over the
+    // same durable Volume. A finished Modal Sandbox is never resumed.
+    const { acquireWorkspace, isRuntimeConfigured, releaseWorkspace } = await import("./lib/runtime.js");
+    if (!isRuntimeConfigured()) return;
+    const { workspace } = await acquireWorkspace(project.id);
+    releaseWorkspace(workspace);
   });
 
   await startSandboxQueueWorker();

@@ -18,7 +18,7 @@ services:
     runtime: node
     rootDir: apps/api
     plan: free
-    # dist/ is gitignored, so the workspace packages (@dai/db, @dai/freestyle,
+    # dist/ is gitignored, so the workspace packages (@dai/db, @dai/modal,
     # ...) must be built on the server before the API can require them.
     # Repo scripts use bun, so bootstrap bun first.
     buildCommand: cd ../.. && npm install -g bun && bun install && bun run build:packages && bun run build:api
@@ -41,9 +41,14 @@ services:
       # Empty = disabled; change to your team's vercel.app suffix if it differs.
       - key: VERCEL_DOMAIN_SUFFIX
         value: wither2.vercel.app
-      # Add these manually in the Render dashboard (secret):
-      # FREESTYLE_API_KEY  — VM provisioning
-      # NIM_API_KEY        — NVIDIA NIM LLM access
+      # Add these manually in the Render dashboard as secret env vars:
+      #   MODAL_TOKEN_ID / MODAL_TOKEN_SECRET — execution runtime (Modal)
+      #   NIM_API_KEY                         — NVIDIA NIM LLM access
+      # Optional non-secret overrides: MODAL_CPU, MODAL_MEMORY_MIB,
+      # MODAL_IDLE_TIMEOUT_MS, MODAL_VOLUME_NAME, MODAL_PREVIEW_PORTS.
+      #
+      # The Modal image is built once out-of-band (never during a request):
+      #   bun run tsx scripts/build-runtime-image.ts
 
 databases:
   - name: dai-db

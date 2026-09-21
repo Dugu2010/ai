@@ -11,8 +11,13 @@ import { NIMClient, type ToolDefinition, type ChatMessage, type ToolCall } from 
 import { requireAuth, getAuthUser } from "../lib/auth.js";
 import { resolveNimConfig } from "../lib/nim-config.js";
 import { validatePath, validateCommandOptions, MAX_TIMEOUT_MS } from "../lib/validation.js";
-import { CODESANDBOX_API_KEY } from "../lib/env.js";
-import { CodeSandboxClient } from "@dai/codesandbox";
+import {
+  acquireWorkspace,
+  isRuntimeConfigured,
+  releaseWorkspace,
+  runtimeDefaultPort,
+} from "../lib/runtime.js";
+import type { Workspace } from "@dai/modal";
 
 const router = Router();
 router.use(requireAuth);
@@ -166,12 +171,40 @@ const TOOLS: ToolDefinition[] = [
     function: {
       name: "stop_dev_server",
       description: "Stop the running development server",
-      parameters: { type: "object", properties: {} },
+      parameters: {
+        type: "object",
+        properties: { port: { type: "number", description: "Port the server listens on (default: the configured preview port)" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git_status",
+      description: "Inspect git branch, staged, modified and untracked files",
+      parameters: {
+        type: "object",
+        properties: { cwd: { type: "string", description: "Repository directory (default: /workspace)" } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git_diff",
+      description: "Show staged and unstaged git changes",
+      parameters: {
+        type: "object",
+        properties: { cwd: { type: "string", description: "Repository directory (default: /workspace)" } },
+      },
     },
   },
 ];
 
 const MAX_ITERATIONS = 12;
+
+/** Port DAI serves previews on when a tool call does not name one. */
+const DEFAULT_PREVIEW_PORT = runtimeDefaultPort();
 
 function toWireToolCalls(calls: ToolCall[]) {
   return calls.map((c) => ({
@@ -182,11 +215,11 @@ function toWireToolCalls(calls: ToolCall[]) {
 }
 
 async function executeTool(
-  client: CodeSandboxClient | null,
+  workspace: Workspace | null,
   name: string,
   args: Record<string, unknown>
 ): Promise<{ result: string; success: boolean }> {
-  if (!client) {
+  if (!workspace) {
     throw Object.assign(new Error("Sandbox is not available. The project sandbox could not be reached."), { statusCode: 503 });
   }
   try {
@@ -194,16 +227,13 @@ async function executeTool(
       case "list_files": {
         const v = validatePath(String(args.path ?? "/workspace"));
         if (!v.valid || !v.normalized) return { result: `Error: ${v.error}`, success: false };
-        const entries = await client.readDir(v.normalized);
-        return {
-          result: JSON.stringify(entries, null, 2),
-          success: true,
-        };
+        const entries = await workspace.listFiles(v.normalized);
+        return { result: JSON.stringify(entries, null, 2), success: true };
       }
       case "read_file": {
         const v = validatePath(String(args.path ?? ""));
         if (!v.valid || !v.normalized) return { result: `Error: ${v.error}`, success: false };
-        const content = await client.readFile(v.normalized);
+        const content = await workspace.readFile(v.normalized);
         return content === null
           ? { result: "Error: file not found", success: false }
           : { result: content, success: true };
@@ -211,7 +241,7 @@ async function executeTool(
       case "write_file": {
         const v = validatePath(String(args.path ?? ""));
         if (!v.valid || !v.normalized) return { result: `Error: ${v.error}`, success: false };
-        await client.writeTextFile(v.normalized, String(args.content ?? ""));
+        await workspace.writeFile(v.normalized, String(args.content ?? ""));
         return { result: "File written successfully", success: true };
       }
       case "edit_file": {
@@ -220,7 +250,7 @@ async function executeTool(
         const oldStr = String(args.oldString ?? "");
         const newStr = String(args.newString ?? "");
         if (!oldStr) return { result: "Error: oldString is required", success: false };
-        const current = await client.readFile(v.normalized);
+        const current = await workspace.readFile(v.normalized);
         if (current === null) return { result: "Error: file not found", success: false };
         const first = current.indexOf(oldStr);
         if (first === -1) return { result: "Error: oldString not found in file", success: false };
@@ -228,13 +258,13 @@ async function executeTool(
         if (second !== -1) {
           return { result: "Error: oldString matches multiple locations; include more surrounding text", success: false };
         }
-        await client.writeTextFile(v.normalized, current.slice(0, first) + newStr + current.slice(first + oldStr.length));
+        await workspace.writeFile(v.normalized, current.slice(0, first) + newStr + current.slice(first + oldStr.length));
         return { result: "Edit applied successfully", success: true };
       }
       case "delete_file": {
         const v = validatePath(String(args.path ?? ""));
         if (!v.valid || !v.normalized) return { result: `Error: ${v.error}`, success: false };
-        await client.remove(v.normalized);
+        await workspace.remove(v.normalized);
         return { result: "File deleted", success: true };
       }
       case "rename_file": {
@@ -242,7 +272,7 @@ async function executeTool(
         const newV = validatePath(String(args.newPath ?? ""));
         if (!oldV.valid || !oldV.normalized) return { result: `Error: ${oldV.error}`, success: false };
         if (!newV.valid || !newV.normalized) return { result: `Error: ${newV.error}`, success: false };
-        await client.rename(oldV.normalized, newV.normalized);
+        await workspace.rename(oldV.normalized, newV.normalized);
         return { result: "File renamed", success: true };
       }
       case "run_command": {
@@ -256,10 +286,11 @@ async function executeTool(
         const cwdV = validatePath(String(args.cwd ?? "/workspace"));
         if (!cwdV.valid || !cwdV.normalized) return { result: `Error: ${cwdV.error}`, success: false };
         const timeout = Math.min(Number(args.timeoutMs) || MAX_TIMEOUT_MS, MAX_TIMEOUT_MS);
-        const r = await client.exec(command, { cwd: cwdV.normalized, timeoutMs: timeout });
+        const r = await workspace.exec(command, { cwd: cwdV.normalized, timeoutMs: timeout });
         const out = [
           r.stdout ? `stdout:\n${r.stdout}` : null,
           r.stderr ? `stderr:\n${r.stderr}` : null,
+          r.timedOut ? "timed out" : null,
           `exit code: ${r.exitCode}`,
         ]
           .filter(Boolean)
@@ -269,13 +300,13 @@ async function executeTool(
       case "search_files": {
         const dirV = validatePath(String(args.dir ?? "/workspace"));
         if (!dirV.valid || !dirV.normalized) return { result: `Error: ${dirV.error}`, success: false };
-        const files = await client.searchFiles(dirV.normalized, String(args.pattern ?? "*"));
+        const files = await workspace.searchFiles(dirV.normalized, String(args.pattern ?? "*"));
         return { result: files.length ? files.join("\n") : "No files matched", success: true };
       }
       case "search_content": {
         const dirV = validatePath(String(args.dir ?? "/workspace"));
         if (!dirV.valid || !dirV.normalized) return { result: `Error: ${dirV.error}`, success: false };
-        const matches = await client.searchContent(dirV.normalized, String(args.pattern ?? ""));
+        const matches = await workspace.searchContent(dirV.normalized, String(args.pattern ?? ""));
         return {
           result: matches.length ? JSON.stringify(matches, null, 2) : "No content matched",
           success: true,
@@ -283,24 +314,35 @@ async function executeTool(
       }
       case "start_dev_server": {
         const command = String(args.command ?? "");
-        const port = Number(args.port ?? 3000);
+        const port = Number(args.port ?? DEFAULT_PREVIEW_PORT);
         if (!command || !port || port < 1 || port > 65535) {
           return { result: "Error: command and valid port required", success: false };
         }
-        await client.startDevServer("/workspace", command, port);
-        const up = await client.waitForPort(port);
-        const domainSuffix = process.env.DAI_PREVIEW_DOMAIN_SUFFIX || "csb.app";
-        const url = await client.getPreviewUrl(port);
+        const cwdV = validatePath(String(args.cwd ?? "/workspace"));
+        if (!cwdV.valid || !cwdV.normalized) return { result: `Error: ${cwdV.error}`, success: false };
+        const server = await workspace.startDevServer({ command, port, cwd: cwdV.normalized });
+        const url = await workspace.getPreviewUrl(port);
         return {
-          result: up
-            ? `Dev server is up at ${url.url}`
-            : `Dev server process started at ${url.url} but the port is not answering yet — it may still be booting.`,
+          result: server.ready
+            ? `Dev server is up at ${url.url ?? "(no tunnel url)"}`
+            : `Dev server process started${url.url ? ` at ${url.url}` : ""} but nothing is listening on port ${port} yet — it may still be booting.`,
           success: true,
         };
       }
       case "stop_dev_server": {
-        await client.stopDevServer();
-        return { result: "Dev server stopped", success: true };
+        const port = Number(args.port ?? DEFAULT_PREVIEW_PORT);
+        await workspace.stopDevServer(port);
+        return { result: `Dev server stopped on port ${port}`, success: true };
+      }
+      case "git_status": {
+        const cwdV = validatePath(String(args.cwd ?? "/workspace"));
+        if (!cwdV.valid || !cwdV.normalized) return { result: `Error: ${cwdV.error}`, success: false };
+        return { result: JSON.stringify(await workspace.getGitStatus(cwdV.normalized), null, 2), success: true };
+      }
+      case "git_diff": {
+        const cwdV = validatePath(String(args.cwd ?? "/workspace"));
+        if (!cwdV.valid || !cwdV.normalized) return { result: `Error: ${cwdV.error}`, success: false };
+        return { result: JSON.stringify(await workspace.getGitDiff(cwdV.normalized), null, 2), success: true };
       }
       default:
         return { result: `Error: unknown tool ${name}`, success: false };
@@ -315,7 +357,7 @@ function writeSSE(res: Response, event: string, data: Record<string, unknown>): 
 }
 
 router.post("/:id/agent", async (req: Request, res: Response) => {
-  let codesandboxClient: CodeSandboxClient | null = null;
+  let workspace: Workspace | null = null;
   try {
     const user = getAuthUser(req);
     const project = await getProjectByUser(req.params.id!, user.userId);
@@ -330,25 +372,31 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       return;
     }
 
-    // Bring the sandbox up BEFORE flushing the SSE headers so an unavailable
-    // sandbox can be reported with a structured 503 JSON response instead of a
-    // half-open stream.
-    let sandboxReady = false;
-    if (project.sandboxId && CODESANDBOX_API_KEY()) {
-      codesandboxClient = new CodeSandboxClient(CODESANDBOX_API_KEY());
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          await codesandboxClient.resumeSandbox(project.sandboxId);
-          sandboxReady = true;
-          break;
-        } catch {
-          if (attempt === 0) await new Promise((r) => setTimeout(r, 1500));
-        }
-      }
-      if (!sandboxReady) {
-        res.status(503).json({ error: "Sandbox is not available. Please try again.", status: "error" });
+    // Attach to the project's runtime BEFORE flushing the SSE headers, so an
+    // unavailable runtime can be reported as structured 503 JSON instead of a
+    // half-open stream. One Sandbox serves the whole run; tools never
+    // provision per command.
+    let runtimeReady = false;
+    if (isRuntimeConfigured()) {
+      try {
+        const acquired = await acquireWorkspace(project.id);
+        workspace = acquired.workspace;
+        runtimeReady = true;
+      } catch (error: any) {
+        // A project with no sandbox id yet that cannot create one is a hard
+        // failure; report it rather than silently answering without tools.
+        console.error("[agent] runtime acquisition failed:", error?.message ?? error);
+        res
+          .status(error?.statusCode ?? 503)
+          .json({ error: error?.message ?? "Sandbox is not available. Please try again.", status: "error" });
         return;
       }
+    } else {
+      res.status(503).json({
+        error: "No execution runtime is configured. Set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET on the backend.",
+        status: "error",
+      });
+      return;
     }
 
     res.setHeader("Content-Type", "text/event-stream");
@@ -395,7 +443,7 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
     const allToolCalls: { id: string; name: string; arguments: Record<string, unknown>; success: boolean; result?: string }[] = [];
 
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-      const response = await nim.chat({ messages, tools: sandboxReady ? TOOLS : undefined });
+      const response = await nim.chat({ messages, tools: runtimeReady ? TOOLS : undefined });
 
       if (response.content) {
         finalContent = response.content;
@@ -403,7 +451,7 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
         writeSSE(res, "assistant_delta", { text: response.content });
       }
 
-      if (response.toolCalls.length === 0 || !sandboxReady) {
+      if (response.toolCalls.length === 0 || !runtimeReady) {
         break;
       }
 
@@ -421,11 +469,7 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       for (const call of response.toolCalls) {
         writeSSE(res, "tool_call", { id: call.id, name: call.name, args: call.arguments });
 
-        const { result, success } = await executeTool(
-          sandboxReady ? codesandboxClient : null,
-          call.name,
-          call.arguments
-        );
+        const { result, success } = await executeTool(workspace, call.name, call.arguments);
         allToolCalls.push({ id: call.id, name: call.name, arguments: call.arguments, success, result: result.slice(0, 500) });
 
         writeSSE(res, "tool_result", {
@@ -480,6 +524,10 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
     } catch {
       // Response already broken.
     }
+  } finally {
+    // Release the local handle only. The Sandbox stays up for the next request
+    // and is reclaimed by Modal's idle timeout once the developer stops working.
+    if (workspace) releaseWorkspace(workspace);
   }
 });
 

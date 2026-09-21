@@ -1,236 +1,108 @@
 import { Router, Request, Response } from "express";
 import { getProjectByUser, updateProject } from "@dai/db";
-import type { Project } from "@dai/types";
 import { requireAuth, getAuthUser } from "../lib/auth.js";
-import { CODESANDBOX_API_KEY } from "../lib/env.js";
-import { CodeSandboxClient } from "@dai/codesandbox";
-import {
-  validatePath,
-  validateCommandOptions,
-  MAX_REQUEST_BODY_SIZE,
-  MAX_OUTPUT_SIZE,
-  MAX_FILE_READ_SIZE,
-  MAX_TIMEOUT_MS,
-} from "../lib/validation.js";
+import { validatePath, validateCommandOptions, MAX_REQUEST_BODY_SIZE, MAX_OUTPUT_SIZE, MAX_FILE_READ_SIZE, MAX_TIMEOUT_MS } from "../lib/validation.js";
+import { acquireWorkspace, isRuntimeConfigured, releaseWorkspace, runtimeDefaultPort, runtimeState, terminateRuntime } from "../lib/runtime.js";
+import { MAX_ACTIVE_SANDBOXES as MAX_ACTIVE_RUNTIME_PROJECTS } from "../lib/sandbox-queue.js";
+import type { Workspace } from "@dai/modal";
+import type { Project } from "@dai/types";
 
 const router = Router();
 router.use(requireAuth);
 
-function codesandbox(): CodeSandboxClient {
-  const apiKey = CODESANDBOX_API_KEY();
-  if (!apiKey) {
-    throw Object.assign(new Error("CODESANDBOX_API_KEY is not configured on the backend"), { statusCode: 503 });
-  }
-  return new CodeSandboxClient(apiKey);
-}
+const DEV_PORT = runtimeDefaultPort();
 
-const DEV_PORT = 3000;
-/** Signed preview URLs are valid for 1 hour (see createHostPreview / sdk.hosts.createToken). */
-const HOST_TOKEN_TTL_HOURS = 1;
+/** Projects untouched this long are surfaced as cold. */
+const ARCHIVE_AFTER_DAYS = 7;
 
-// Check if sandbox is archived (>7 days since last access)
 function isArchived(lastAccessedAt: string | null): boolean {
   if (!lastAccessedAt) return false;
   const daysSinceAccess = (Date.now() - new Date(lastAccessedAt).getTime()) / (1000 * 60 * 60 * 24);
-  return daysSinceAccess > 7;
+  return daysSinceAccess > ARCHIVE_AFTER_DAYS;
+}
+
+function runtimeNotConfigured(res: Response): boolean {
+  if (isRuntimeConfigured()) return false;
+  res.status(503).json({
+    error: "No execution runtime is configured. Set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET on the backend.",
+    status: "error",
+  });
+  return true;
 }
 
 /**
- * Bring the sandbox to a booted, ready state.
+ * Resolve the project and attach it to a live Sandbox.
  *
- * Clean bootup handling per https://codesandbox.stream/docs/sdk/resume
- * ("Clean Bootups") and https://codesandbox.stream/docs/sdk/setup:
- * on a CLEAN boot the setup tasks run again, so we wait for every setup step
- * to finish BEFORE any agent command executes. In @codesandbox/sdk 2.4.2,
- * `client.setup.getSteps()` is synchronous and returns `Step[]`, each with
- * `step.waitUntilComplete()`; `client.setup.waitUntilComplete()` awaits all.
+ * `acquireWorkspace` reattaches to the stored Sandbox while it is still
+ * running and otherwise mounts a new one over the same durable Volume, so this
+ * never provisions compute per request beyond what the project already needs.
+ * The returned handle is released by `close()`, which leaves the Sandbox up.
  */
-async function ensureSandboxBooted(
-  client: CodeSandboxClient,
-  project: Project
-): Promise<{
-  booted: boolean;
-  bootupType: "CLEAN" | "RESUME" | "RUNNING" | "FORK" | null;
-  isUpToDate: boolean | null;
-  archived: boolean;
-}> {
-  const archived = isArchived(project.lastAccessedAt);
-  if (!project.sandboxId) {
-    return { booted: false, bootupType: null, isUpToDate: null, archived };
-  }
-  let lastError: Error | null = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const result = await client.resumeSandbox(project.sandboxId);
-      await updateProject(project.id, {
-        lastAccessedAt: new Date().toISOString(),
-        isHibernated: false,
-        bootupType: result.bootupType,
-        isUpToDate: result.isUpToDate,
-      });
-      return {
-        booted: true,
-        bootupType: result.bootupType,
-        isUpToDate: result.isUpToDate,
-        archived,
-      };
-    } catch (error: any) {
-      lastError = error;
-      if (attempt === 0) {
-        await new Promise((r) => setTimeout(r, 1500));
-      }
-    }
-  }
-  throw Object.assign(new Error(`Sandbox resume failed after retry: ${lastError?.message ?? "unknown"}`), { statusCode: 503 });
-}
-
-/**
- * Preview proxy payload.
- *
- * Per https://codesandbox.stream/docs/sdk/resume: "Avoid automatic HTTP wakeup
- * — waking it up from a preview URL can create a blocking UX. Rather implement
- * a proxy through your server." So the browser never hits $SANDBOX_ID-$PORT.csb.app
- * directly while hibernated: it calls POST /preview/proxy, we explicitly resume
- * the sandbox, make sure the dev-server task is running, wait for the port, and
- * only then hand back a signed host URL (sdk.hosts.createToken/getUrl).
- */
-async function previewProxy(
-  req: Request,
+async function workspaceForProject(
   projectId: string,
-  port: number
-): Promise<{
-  url: string | null;
-  isHibernated: boolean;
-  wasHibernated: boolean;
-  isArchived: boolean;
-  bootupType: "CLEAN" | "RESUME" | "RUNNING" | "FORK" | null;
-  devServerRunning: boolean;
-  warning?: string;
-}> {
-  const user = getAuthUser(req);
-  const project = await getProjectByUser(projectId, user.userId);
-  if (!project || !project.sandboxId) {
-    return {
-      url: null,
-      isHibernated: false,
-      wasHibernated: false,
-      isArchived: false,
-      bootupType: null,
-      devServerRunning: false,
-    };
-  }
-
-  const client = codesandbox();
-  const archived = isArchived(project.lastAccessedAt);
-
-  // 1) Explicit resume (handles CLEAN bootup setup waits too).
-  const booted = await ensureSandboxBooted(client, project);
-
-  // 2) Make sure the dev server task (defined in .codesandbox/tasks.json) runs.
-  //    startDevServer reuses the task when it is already running and throws a
-  //    clear error if the template defines no such task.
-  let devServerRunning = project.devServerRunning;
-  try {
-    const { reused } = await client.startDevServer("/workspace", "npm run dev", port);
-    devServerRunning = true;
-    if (!reused) {
-      await updateProject(project.id, { devServerRunning: true });
-    }
-  } catch (error: any) {
-    console.warn(`[workspace:preview-proxy] dev task not started: ${error?.message ?? error}`);
-  }
-
-  // 3) Wait briefly for the port so the first iframe load does not fail.
-  await client.waitForPort(port, 40_000);
-
-  // 4) Signed host URL via the documented HostTokens API:
-  //    createToken(sandboxId, { expiresAt: Date }): Promise<HostToken>
-  //    getUrl(token, port): string
-  //    (https://codesandbox.io/docs/sdk/sandbox-hosts). The signed URL sets a
-  //    cookie in the browser so subsequent iframe requests authenticate.
-  const preview = await client.createHostPreview(project.sandboxId, port, HOST_TOKEN_TTL_HOURS);
-
-  return {
-    url: preview.url,
-    isHibernated: false,
-    wasHibernated: project.isHibernated,
-    isArchived: archived,
-    bootupType: booted.bootupType,
-    devServerRunning,
-    warning: archived ? "This project is in cold storage. Opening may take up to a minute." : undefined,
-  };
-}
-
-async function sandboxForProject(
-  req: Request,
-  projectId: string
-): Promise<{
-  client: CodeSandboxClient;
-  project: Project;
-  bootupType: "CLEAN" | "RESUME" | "RUNNING" | "FORK" | null;
-} | null> {
-  const user = getAuthUser(req);
-  const project = await getProjectByUser(projectId, user.userId);
+  userId: string
+): Promise<{ workspace: Workspace; project: Project } | { error: string; status: number } | null> {
+  const project = await getProjectByUser(projectId, userId);
   if (!project) return null;
-  const client = codesandbox();
-  if (!project.sandboxId) {
-    return { client, project, bootupType: null };
+  if (!project.sandboxId && project.runtimeProvider !== "modal") {
+    return { status: 409, error: "Project sandbox is not provisioned yet" };
   }
-  try {
-    const booted = await ensureSandboxBooted(client, project);
-    return { client, project, bootupType: booted.bootupType };
-  } catch (error: any) {
-    if (error.statusCode === 503) {
-      throw error;
-    }
-    console.warn(`[workspace] sandbox boot failed: ${error?.message ?? error}`);
-    return { client, project, bootupType: null };
-  }
+  const { workspace } = await acquireWorkspace(project.id);
+  return { workspace, project };
 }
 
 // GET /api/workspace/:projectId?path=/workspace — list directory
 router.get("/:projectId", async (req: Request, res: Response) => {
+  let workspace: Workspace | null = null;
   try {
-    const ctx = await sandboxForProject(req, req.params.projectId!);
+    if (runtimeNotConfigured(res)) return;
+    const user = getAuthUser(req);
+    const ctx = await workspaceForProject(req.params.projectId!, user.userId);
     if (!ctx) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    if (!ctx.project.sandboxId) {
-      res.status(409).json({ error: "Project sandbox is not provisioned yet" });
+    if ("error" in ctx) {
+      res.status(ctx.status).json({ error: ctx.error });
       return;
     }
+    workspace = ctx.workspace;
     const path = (req.query.path as string) || "/workspace";
     const validation = validatePath(path);
     if (!validation.valid || !validation.normalized) {
       res.status(403).json({ error: validation.error || "Invalid path" });
       return;
     }
-    const entries = await ctx.client.readDir(validation.normalized);
-    res.json(entries);
+    res.json(await workspace.listFiles(validation.normalized));
   } catch (error: any) {
     console.error("[workspace:GET]", error.message);
     res.status(error.statusCode || 500).json({ error: error.message });
+  } finally {
+    if (workspace) releaseWorkspace(workspace);
   }
 });
 
 // POST /api/workspace/:projectId — { action: write|create|delete|rename|move, path, content?, newPath? }
 router.post("/:projectId", async (req: Request, res: Response) => {
+  let workspace: Workspace | null = null;
   try {
-    const ctx = await sandboxForProject(req, req.params.projectId!);
-    if (!ctx) {
-      res.status(404).json({ error: "Project not found" });
-      return;
-    }
-    if (!ctx.project.sandboxId) {
-      res.status(409).json({ error: "Project sandbox is not provisioned yet" });
-      return;
-    }
+    if (runtimeNotConfigured(res)) return;
+    const user = getAuthUser(req);
     const contentLength = req.headers["content-length"];
     if (contentLength && parseInt(contentLength) > MAX_REQUEST_BODY_SIZE) {
       res.status(413).json({ error: "Request body exceeds maximum size" });
       return;
     }
+    const ctx = await workspaceForProject(req.params.projectId!, user.userId);
+    if (!ctx) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    if ("error" in ctx) {
+      res.status(ctx.status).json({ error: ctx.error });
+      return;
+    }
+    workspace = ctx.workspace;
     const { action, path, content, newPath } = req.body ?? {};
     if (!path || typeof path !== "string") {
       res.status(400).json({ error: "Path is required" });
@@ -244,11 +116,11 @@ router.post("/:projectId", async (req: Request, res: Response) => {
     switch (action) {
       case "write":
       case "create": {
-        await ctx.client.writeTextFile(pathValidation.normalized, typeof content === "string" ? content : "");
+        await workspace.writeFile(pathValidation.normalized, typeof content === "string" ? content : "");
         break;
       }
       case "delete": {
-        await ctx.client.remove(pathValidation.normalized);
+        await workspace.remove(pathValidation.normalized);
         break;
       }
       case "rename":
@@ -262,7 +134,7 @@ router.post("/:projectId", async (req: Request, res: Response) => {
           res.status(400).json({ error: newPathValidation.error || "Invalid new path" });
           return;
         }
-        await ctx.client.rename(pathValidation.normalized, newPathValidation.normalized);
+        await workspace.rename(pathValidation.normalized, newPathValidation.normalized);
         break;
       }
       default:
@@ -273,28 +145,34 @@ router.post("/:projectId", async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("[workspace:POST]", error.message);
     res.status(error.statusCode || 500).json({ error: error.message });
+  } finally {
+    if (workspace) releaseWorkspace(workspace);
   }
 });
 
 // GET /api/workspace/:projectId/file?path=... — read file contents
 router.get("/:projectId/file", async (req: Request, res: Response) => {
+  let workspace: Workspace | null = null;
   try {
-    const ctx = await sandboxForProject(req, req.params.projectId!);
+    if (runtimeNotConfigured(res)) return;
+    const user = getAuthUser(req);
+    const ctx = await workspaceForProject(req.params.projectId!, user.userId);
     if (!ctx) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    if (!ctx.project.sandboxId) {
-      res.status(409).json({ error: "Project sandbox is not provisioned yet" });
+    if ("error" in ctx) {
+      res.status(ctx.status).json({ error: ctx.error });
       return;
     }
+    workspace = ctx.workspace;
     const path = (req.query.path as string) || "";
     const validation = validatePath(path);
     if (!validation.valid || !validation.normalized) {
       res.status(403).json({ error: validation.error || "Invalid path" });
       return;
     }
-    const content = await ctx.client.readFile(validation.normalized);
+    const content = await workspace.readFile(validation.normalized);
     if (content === null) {
       res.status(404).json({ error: "File not found" });
       return;
@@ -308,26 +186,33 @@ router.get("/:projectId/file", async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("[workspace:file]", error.message);
     res.status(error.statusCode || 500).json({ error: error.message });
+  } finally {
+    if (workspace) releaseWorkspace(workspace);
   }
 });
 
 // POST /api/workspace/:projectId/command — { command, cwd?, timeoutMs? }
+// Internal endpoint used by the agent tooling; never exposed as a user terminal.
 router.post("/:projectId/command", async (req: Request, res: Response) => {
+  let workspace: Workspace | null = null;
   try {
-    const ctx = await sandboxForProject(req, req.params.projectId!);
-    if (!ctx) {
-      res.status(404).json({ error: "Project not found" });
-      return;
-    }
-    if (!ctx.project.sandboxId) {
-      res.status(409).json({ error: "Project sandbox is not provisioned yet" });
-      return;
-    }
+    if (runtimeNotConfigured(res)) return;
+    const user = getAuthUser(req);
     const contentLength = req.headers["content-length"];
     if (contentLength && parseInt(contentLength) > MAX_REQUEST_BODY_SIZE) {
       res.status(413).json({ error: "Request body exceeds maximum size" });
       return;
     }
+    const ctx = await workspaceForProject(req.params.projectId!, user.userId);
+    if (!ctx) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    if ("error" in ctx) {
+      res.status(ctx.status).json({ error: ctx.error });
+      return;
+    }
+    workspace = ctx.workspace;
     const { command, cwd, timeoutMs } = req.body ?? {};
     const validation = validateCommandOptions({ command, cwd, timeoutMs });
     if (!validation.valid) {
@@ -340,10 +225,7 @@ router.post("/:projectId/command", async (req: Request, res: Response) => {
       return;
     }
     const effectiveTimeout = Math.min(Number(timeoutMs) || MAX_TIMEOUT_MS, MAX_TIMEOUT_MS);
-    const result = await ctx.client.exec(command, {
-      cwd: cwdValidation.normalized,
-      timeoutMs: effectiveTimeout,
-    });
+    const result = await workspace.exec(command, { cwd: cwdValidation.normalized, timeoutMs: effectiveTimeout });
     if (JSON.stringify(result).length > MAX_OUTPUT_SIZE) {
       res.status(413).json({ error: "Output exceeds maximum size" });
       return;
@@ -352,14 +234,14 @@ router.post("/:projectId/command", async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("[workspace:command]", error.message);
     res.status(error.statusCode || 500).json({ error: error.message });
+  } finally {
+    if (workspace) releaseWorkspace(workspace);
   }
 });
 
-// GET /api/workspace/:projectId/status — sandbox state WITHOUT waking it up.
-// Uses sandboxes.get() for existence and listRunning() for whether the VM is
-// actually up. Resume is deliberately NOT called here:
-// per https://codesandbox.stream/docs/sdk/resume, waking should be an explicit,
-// user-visible step (POST /preview/proxy), never a polling side effect.
+// GET /api/workspace/:projectId/status — runtime state WITHOUT provisioning.
+// Polls the stored Sandbox id; Modal's `poll()` is the only non-waking liveness
+// signal, so "running" here means the VM is genuinely accepting commands.
 router.get("/:projectId/status", async (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
@@ -368,42 +250,20 @@ router.get("/:projectId/status", async (req: Request, res: Response) => {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    if (!project.sandboxId) {
-      res.json({
-        state: "provisioning",
-        sandboxId: null,
-        previewUrl: project.previewUrl,
-        devServerRunning: false,
-        isHibernated: project.isHibernated,
-        isArchived: isArchived(project.lastAccessedAt),
-        bootupType: project.bootupType,
-        isUpToDate: project.isUpToDate,
-      });
-      return;
-    }
-    let reachable = false;
-    let running = false;
-    try {
-      const client = codesandbox();
-      reachable = (await client.getSandboxInfo(project.sandboxId)) !== null;
-      if (reachable) {
-        running = await client.isSandboxRunning(project.sandboxId);
-      }
-    } catch (error: any) {
-      console.warn(`[workspace:status] sandbox lookup failed: ${error?.message ?? error}`);
-    }
     const archived = isArchived(project.lastAccessedAt);
-    // `reachable` alone is NOT "running": SandboxInfo carries no state field, so
-    // a metadata hit only proves the sandbox exists. `listRunning()` decides.
-    const state = !reachable ? "unknown" : running ? "running" : archived ? "archived" : "hibernated";
+    const state = await runtimeState(project.id);
+    // Modal has no hibernation, so a stopped Sandbox is reported with the
+    // existing "hibernated" vocabulary: no live compute, workspace intact.
+    const reported = state === "stopped" ? "hibernated" : state;
     res.json({
-      state,
+      state: reported,
       sandboxId: project.sandboxId,
+      runtimeProvider: project.runtimeProvider,
       previewUrl: project.previewUrl,
-      devServerRunning: running ? project.devServerRunning : false,
+      devServerRunning: state === "running" ? project.devServerRunning : false,
       devServerPort: project.previewPort,
       lastError: project.lastError,
-      isHibernated: !running,
+      isHibernated: state !== "running",
       isArchived: archived,
       bootupType: project.bootupType,
       isUpToDate: project.isUpToDate,
@@ -414,19 +274,23 @@ router.get("/:projectId/status", async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/workspace/:projectId/preview — start the dev server task, wait for
-// the port, and return a preview URL.
+// POST /api/workspace/:projectId/preview — start the dev server, wait for the
+// port to actually listen, then return an authenticated tunnel URL.
 router.post("/:projectId/preview", async (req: Request, res: Response) => {
+  let workspace: Workspace | null = null;
   try {
-    const ctx = await sandboxForProject(req, req.params.projectId!);
+    if (runtimeNotConfigured(res)) return;
+    const user = getAuthUser(req);
+    const ctx = await workspaceForProject(req.params.projectId!, user.userId);
     if (!ctx) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    if (!ctx.project.sandboxId) {
-      res.status(409).json({ error: "Project sandbox is not provisioned yet" });
+    if ("error" in ctx) {
+      res.status(ctx.status).json({ error: ctx.error });
       return;
     }
+    workspace = ctx.workspace;
     const { command, port } = req.body ?? {};
     const devPort = Number(port) || DEV_PORT;
     const devCommand = typeof command === "string" && command.trim() ? command.trim() : "npm run dev";
@@ -435,116 +299,145 @@ router.post("/:projectId/preview", async (req: Request, res: Response) => {
       return;
     }
 
-    // Uses the Tasks system (client.tasks) under the hood — see
-    // CodeSandboxClient.startDevServer. Never shells.run().
-    const { taskId } = await ctx.client.startDevServer("/workspace", devCommand, devPort);
-    const portUp = await ctx.client.waitForPort(devPort, 40_000);
-
-    let previewUrl: string | null = ctx.project.previewUrl ?? null;
-    if (!previewUrl && ctx.project.previewDomain) {
-      previewUrl = `https://${ctx.project.previewDomain}`;
-    }
-    if (!previewUrl) {
-      const target = await ctx.client.getPreviewUrl(devPort);
-      previewUrl = target.url;
-    }
+    const server = await workspace.startDevServer({ command: devCommand, port: devPort });
+    const preview = await workspace.getPreviewUrl(devPort);
 
     await updateProject(ctx.project.id, {
       previewPort: devPort,
-      previewUrl,
+      previewUrl: preview.url,
       devServerRunning: true,
       status: "ready",
       lastError: null,
     });
 
     res.json({
-      url: previewUrl,
+      url: preview.url,
+      // Modal requires this token to reach the tunnel; the proxy endpoint hands
+      // it to the browser so the preview is not a public URL.
+      token: preview.token,
       port: devPort,
-      taskId,
-      portUp,
-      note: portUp ? undefined : "Dev server is starting; the URL may take a few more seconds.",
+      reused: server.reused,
+      portUp: server.ready,
+      note: server.ready ? undefined : "Dev server is starting; the URL may take a few more seconds.",
     });
   } catch (error: any) {
     console.error("[workspace:preview]", error.message);
     res.status(error.statusCode || 500).json({ error: error.message });
+  } finally {
+    if (workspace) releaseWorkspace(workspace);
   }
 });
 
-// POST /api/workspace/:projectId/preview/proxy — the Item 9 preview proxy.
-// Explicitly resumes a hibernated sandbox (no automatic HTTP wakeup), ensures
-// the dev task is running, waits for the port, then returns a signed URL from
-// sdk.hosts.createToken()/getUrl(). The frontend shows its loading state while
-// this request is in flight (1-3s regular resume, up to ~60s from cold storage).
+// POST /api/workspace/:projectId/preview/proxy — resume-or-create, ensure the
+// dev server, then return the authenticated tunnel URL. The browser owns its
+// own loading state while this is in flight.
 router.post("/:projectId/preview/proxy", async (req: Request, res: Response) => {
+  let workspace: Workspace | null = null;
   try {
-    const result = await previewProxy(req, req.params.projectId!, DEV_PORT);
-    res.json(result);
+    if (runtimeNotConfigured(res)) return;
+    const user = getAuthUser(req);
+    const ctx = await workspaceForProject(req.params.projectId!, user.userId);
+    if (!ctx) {
+      res.json({ url: null, isHibernated: false, wasHibernated: false, isArchived: false, bootupType: null, devServerRunning: false });
+      return;
+    }
+    if ("error" in ctx) {
+      res.status(ctx.status).json({ error: ctx.error });
+      return;
+    }
+    workspace = ctx.workspace;
+    const port = ctx.project.previewPort || DEV_PORT;
+    let devServerRunning = false;
+    try {
+      const server = await workspace.startDevServer({ command: "npm run dev", port });
+      devServerRunning = server.ready;
+    } catch (error: any) {
+      console.warn(`[workspace:preview-proxy] dev server not started: ${error?.message ?? error}`);
+    }
+    const preview = await workspace.getPreviewUrl(port);
+    await updateProject(ctx.project.id, {
+      previewUrl: preview.url,
+      previewPort: port,
+      devServerRunning,
+      lastAccessedAt: new Date().toISOString(),
+    });
+    res.json({
+      url: preview.url,
+      token: preview.token,
+      isHibernated: false,
+      wasHibernated: ctx.project.isHibernated,
+      isArchived: isArchived(ctx.project.lastAccessedAt),
+      bootupType: ctx.project.bootupType,
+      devServerRunning,
+    });
   } catch (error: any) {
     console.error("[workspace:preview-proxy]", error.message);
     res.status(error.statusCode || 500).json({ error: error.message });
+  } finally {
+    if (workspace) releaseWorkspace(workspace);
   }
 });
 
 // POST /api/workspace/:projectId/preview/stop
 router.post("/:projectId/preview/stop", async (req: Request, res: Response) => {
+  let workspace: Workspace | null = null;
   try {
-    const ctx = await sandboxForProject(req, req.params.projectId!);
+    if (runtimeNotConfigured(res)) return;
+    const user = getAuthUser(req);
+    const ctx = await workspaceForProject(req.params.projectId!, user.userId);
     if (!ctx) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    if (!ctx.project.sandboxId) {
-      res.status(409).json({ error: "Project sandbox is not provisioned yet" });
+    if ("error" in ctx) {
+      res.status(ctx.status).json({ error: ctx.error });
       return;
     }
-    await ctx.client.stopDevServer();
+    workspace = ctx.workspace;
+    await workspace.stopDevServer(ctx.project.previewPort || DEV_PORT);
     await updateProject(ctx.project.id, { devServerRunning: false });
     res.json({ success: true });
   } catch (error: any) {
     console.error("[workspace:preview:stop]", error.message);
     res.status(error.statusCode || 500).json({ error: error.message });
+  } finally {
+    if (workspace) releaseWorkspace(workspace);
   }
 });
 
-// POST /api/workspace/:projectId/restart — restart the sandbox to update the
-// VM agent. Sandboxes.restart() preserves project files and is the documented
-// way to apply an agent update (Sandbox.isUpToDate: "Use 'restart' to update
-// the agent" — https://codesandbox.stream/docs/sdk/resume).
+// POST /api/workspace/:projectId/restart — drop the Sandbox and mount a fresh
+// one. Modal cannot resume a finished Sandbox, so restart means "terminate and
+// recreate over the same Volume"; files survive because they live in the Volume.
 router.post("/:projectId/restart", async (req: Request, res: Response) => {
   try {
+    if (runtimeNotConfigured(res)) return;
     const user = getAuthUser(req);
     const project = await getProjectByUser(req.params.projectId!, user.userId);
-    if (!project || !project.sandboxId) {
-      res.status(404).json({ error: "Project not found or sandbox not provisioned" });
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
       return;
     }
-    const client = codesandbox();
-    const result = await client.restartSandbox(project.sandboxId);
-    await updateProject(project.id, {
-      lastAccessedAt: new Date().toISOString(),
-      isHibernated: false,
-      bootupType: result.bootupType,
-      isUpToDate: result.isUpToDate,
-    });
-    res.json({ success: true, bootupType: result.bootupType, isUpToDate: result.isUpToDate });
+    await terminateRuntime(project.id);
+    const { workspace } = await acquireWorkspace(project.id);
+    const sandboxId = workspace.sandboxId;
+    releaseWorkspace(workspace);
+    res.json({ success: true, sandboxId, bootupType: "CLEAN", isUpToDate: true });
   } catch (error: any) {
     console.error("[workspace:restart]", error.message);
     res.status(error.statusCode || 500).json({ error: error.message });
   }
 });
 
-// GET /api/workspace/:projectId/concurrency — check sandbox concurrency slot
+// GET /api/workspace/:projectId/concurrency — active runtime slots per user
 router.get("/:projectId/concurrency", async (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
     const { countActiveSandboxes } = await import("@dai/db");
     const activeCount = await countActiveSandboxes(user.userId);
-    const canProceed = activeCount < 10;
-
     res.json({
       activeCount,
-      maxAllowed: 10,
-      canProceed,
+      maxAllowed: MAX_ACTIVE_RUNTIME_PROJECTS,
+      canProceed: activeCount < MAX_ACTIVE_RUNTIME_PROJECTS,
     });
   } catch (error: any) {
     console.error("[workspace:concurrency]", error.message);

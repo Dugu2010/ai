@@ -3,7 +3,7 @@
   "references": [
     { "path": "packages/types" },
     { "path": "packages/db" },
-    { "path": "packages/freestyle" },
+    { "path": "packages/modal" },
     { "path": "packages/nim" },
     { "path": "packages/ui" },
     { "path": "apps/web" }

@@ -47,6 +47,18 @@ export async function ensureSchema(): Promise<void> {
     ALTER TABLE projects ADD COLUMN IF NOT EXISTS bootup_type TEXT;
     ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_up_to_date BOOLEAN;
 
+    -- Runtime provider columns. sandbox_id is reused to hold the live Modal
+    -- Sandbox id; the CodeSandbox identifier is retired into
+    -- legacy_sandbox_id rather than dropped, so nothing is silently lost.
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS runtime_provider TEXT;
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS runtime_volume_subpath TEXT;
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS legacy_sandbox_id TEXT;
+    -- Migration outcome per project: modal_workspace_ready | modal_files_imported |
+    -- modal_awaiting_import | modal_import_failed. Written by scripts/migrate-runtime.ts.
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS runtime_migration_status TEXT;
+
+    CREATE INDEX IF NOT EXISTS idx_projects_runtime_provider ON projects(runtime_provider);
+
     CREATE TABLE IF NOT EXISTS sandbox_queue (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -108,5 +120,27 @@ export async function ensureSchema(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id);
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
   `);
+
+  // One-time retirement of pre-Modal runtime identifiers.
+  //
+  // A CodeSandbox sandbox id is not a Modal sandbox id. Leaving it in
+  // `sandbox_id` would make every acquire() attempt a reattach against an id
+  // Modal has never heard of, so it is moved to legacy_sandbox_id, the live
+  // pointer is cleared, and the project is marked for Modal provisioning.
+  // Existing rows keep all their metadata; source files that could be exported
+  // from the previous provider are copied by scripts/migrate-runtime.ts.
+  const retired = await pool.query(
+    `UPDATE projects
+        SET legacy_sandbox_id = sandbox_id,
+            sandbox_id = NULL,
+            runtime_provider = 'codesandbox_retired',
+            status = 'provisioning'
+      WHERE sandbox_id IS NOT NULL
+        AND runtime_provider IS NULL
+      RETURNING id`
+  );
+  if (retired.rowCount) {
+    console.log(`[db] retired ${retired.rowCount} legacy CodeSandbox runtime identifier(s)`);
+  }
   console.log("[db] schema ensured");
 }

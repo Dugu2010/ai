@@ -1,8 +1,17 @@
 # DAI Audit — All Bugs
 
-Original pass found 23 bugs. Re-audit (2026-09-21) records which are fixed and
-adds bugs 24-37 found by re-reading the current source and probing the live
-CodeSandbox API. `FIXED` means verified in the current source, not assumed.
+> **Scope note:** this audit describes the **CodeSandbox-era** runtime. DAI has
+> since migrated to Modal Sandbox + Modal Volume — see `RUNTIME_ARCHITECTURE.md`
+> and `MODAL_RUNTIME_MIGRATION.md`. The findings stay accurate as history, and
+> two of its lessons shaped that design: verify SDK calls against the shipped
+> `.d.ts`, and never treat a metadata lookup as a liveness signal. The
+> "Verification blocker" section below refers to the frozen CodeSandbox account,
+> not to Modal.
+
+The original pass found 23 bugs. A re-audit of the current source confirmed 16 of
+them already fixed, and added bugs 24-42 found by re-reading every file and
+probing the live CodeSandbox API. `FIXED` means verified in the source, not
+assumed. The status roll-up is at the bottom of this file.
 
 ## Bug 1 — auth.ts base64url encoding broken — FIXED
 `apps/api/src/lib/auth.ts:20-22` now replaces `=`, `+` and `/` correctly.

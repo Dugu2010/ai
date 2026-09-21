@@ -1,3 +1,8 @@
+> NOTE (superseded): this is a point-in-time report from an earlier runtime.
+> DAI's execution runtime is now Modal Sandbox + Modal Volume. CodeSandbox and
+> Freestyle have been removed; read RUNTIME_ARCHITECTURE.md and
+> MODAL_RUNTIME_MIGRATION.md for the current state.
+
 # DAI Phase 3 Progress Status
 
 ## Completed

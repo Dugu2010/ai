@@ -162,7 +162,7 @@ export async function createProject(
   { slug, name, description }: { slug: string; name: string; description?: string }
 ): Promise<Project> {
   const res = await query(
-    `INSERT INTO projects (user_id, slug, name, description) VALUES ($1, $2, $3, $4) RETURNING id, slug, name, description, user_id, sandbox_id, sandbox_slug, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at, last_accessed_at, is_hibernated, bootup_type, is_up_to_date`,
+    `INSERT INTO projects (user_id, slug, name, description) VALUES ($1, $2, $3, $4) RETURNING *`,
     [userId, slug, name, description ?? null]
   );
   const row = res.rows[0]!;
@@ -173,6 +173,10 @@ export async function createProject(
     description: row.description ?? null,
     userId: row.user_id,
     sandboxId: row.sandbox_id ?? null,
+    runtimeProvider: row.runtime_provider ?? null,
+    runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
+    legacySandboxId: row.legacy_sandbox_id ?? null,
+    runtimeMigrationStatus: row.runtime_migration_status ?? null,
     sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,
@@ -193,7 +197,7 @@ export async function createProject(
 
 export async function getProject(id: string): Promise<Project | null> {
   const res = await query(
-    `SELECT id, slug, name, description, user_id, sandbox_id, sandbox_slug, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at, last_accessed_at, is_hibernated, bootup_type, is_up_to_date FROM projects WHERE id = $1`,
+    `SELECT * FROM projects WHERE id = $1`,
     [id]
   );
   if (!res.rows[0]) return null;
@@ -205,6 +209,10 @@ export async function getProject(id: string): Promise<Project | null> {
     description: row.description ?? null,
     userId: row.user_id,
     sandboxId: row.sandbox_id ?? null,
+    runtimeProvider: row.runtime_provider ?? null,
+    runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
+    legacySandboxId: row.legacy_sandbox_id ?? null,
+    runtimeMigrationStatus: row.runtime_migration_status ?? null,
     sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,
@@ -225,7 +233,7 @@ export async function getProject(id: string): Promise<Project | null> {
 
 export async function getProjectByUser(id: string, userId: string): Promise<Project | null> {
   const res = await query(
-    `SELECT id, slug, name, description, user_id, sandbox_id, sandbox_slug, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at, last_accessed_at, is_hibernated, bootup_type, is_up_to_date FROM projects WHERE id = $1 AND user_id = $2`,
+    `SELECT * FROM projects WHERE id = $1 AND user_id = $2`,
     [id, userId]
   );
   if (!res.rows[0]) return null;
@@ -237,6 +245,10 @@ export async function getProjectByUser(id: string, userId: string): Promise<Proj
     description: row.description ?? null,
     userId: row.user_id,
     sandboxId: row.sandbox_id ?? null,
+    runtimeProvider: row.runtime_provider ?? null,
+    runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
+    legacySandboxId: row.legacy_sandbox_id ?? null,
+    runtimeMigrationStatus: row.runtime_migration_status ?? null,
     sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,
@@ -257,7 +269,7 @@ export async function getProjectByUser(id: string, userId: string): Promise<Proj
 
 export async function listProjects(userId: string): Promise<Project[]> {
   const res = await query(
-    `SELECT id, slug, name, description, user_id, sandbox_id, sandbox_slug, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at, last_accessed_at, is_hibernated, bootup_type, is_up_to_date FROM projects WHERE user_id = $1 ORDER BY created_at DESC`,
+    `SELECT * FROM projects WHERE user_id = $1 ORDER BY created_at DESC`,
     [userId]
   );
   return res.rows.map((row: any) => ({
@@ -267,6 +279,10 @@ export async function listProjects(userId: string): Promise<Project[]> {
     description: row.description ?? null,
     userId: row.user_id,
     sandboxId: row.sandbox_id ?? null,
+    runtimeProvider: row.runtime_provider ?? null,
+    runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
+    legacySandboxId: row.legacy_sandbox_id ?? null,
+    runtimeMigrationStatus: row.runtime_migration_status ?? null,
     sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,
@@ -470,6 +486,10 @@ export async function updateProject(
     devServerRunning?: boolean;
     lastError?: string | null;
     sandboxId?: string | null;
+    runtimeProvider?: string | null;
+    runtimeVolumeSubPath?: string | null;
+    legacySandboxId?: string | null;
+    runtimeMigrationStatus?: string | null;
     sandboxSlug?: string | null;
     vmId?: string | null;
     vmSlug?: string | null;
@@ -495,6 +515,10 @@ export async function updateProject(
   if (updates.devServerRunning !== undefined) add("dev_server_running", updates.devServerRunning);
   if (updates.lastError !== undefined) add("last_error", updates.lastError);
   if (updates.sandboxId !== undefined) add("sandbox_id", updates.sandboxId);
+  if (updates.runtimeProvider !== undefined) add("runtime_provider", updates.runtimeProvider);
+  if (updates.runtimeVolumeSubPath !== undefined) add("runtime_volume_subpath", updates.runtimeVolumeSubPath);
+  if (updates.legacySandboxId !== undefined) add("legacy_sandbox_id", updates.legacySandboxId);
+  if (updates.runtimeMigrationStatus !== undefined) add("runtime_migration_status", updates.runtimeMigrationStatus);
   if (updates.sandboxSlug !== undefined) add("sandbox_slug", updates.sandboxSlug);
   if (updates.vmId !== undefined) add("vm_id", updates.vmId);
   if (updates.vmSlug !== undefined) add("vm_slug", updates.vmSlug);
@@ -505,7 +529,7 @@ export async function updateProject(
   if (set.length === 0) return null;
   vals.push(id);
   const res = await query(
-    `UPDATE projects SET ${set.join(", ")} WHERE id = $${vals.length} RETURNING id, slug, name, description, user_id, sandbox_id, sandbox_slug, vm_id, vm_slug, status, preview_domain, preview_port, preview_url, dev_server_running, last_error, created_at, updated_at, last_accessed_at, is_hibernated, bootup_type, is_up_to_date`,
+    `UPDATE projects SET ${set.join(", ")} WHERE id = $${vals.length} RETURNING *`,
     vals
   );
   if (!res.rows[0]) return null;
@@ -517,6 +541,10 @@ export async function updateProject(
     description: row.description ?? null,
     userId: row.user_id,
     sandboxId: row.sandbox_id ?? null,
+    runtimeProvider: row.runtime_provider ?? null,
+    runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
+    legacySandboxId: row.legacy_sandbox_id ?? null,
+    runtimeMigrationStatus: row.runtime_migration_status ?? null,
     sandboxSlug: row.sandbox_slug ?? null,
     vmId: row.vm_id ?? null,
     vmSlug: row.vm_slug ?? null,

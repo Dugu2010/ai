@@ -9,7 +9,7 @@ import { ThemeToggle } from "../components/theme-toggle";
 const FEATURES = [
   {
     title: "Real Linux VM",
-    body: "Full Node, Python, Git and a real shell in a CodeSandbox VM — not an emulation layer.",
+    body: "Full Node, Python, Git and a real shell in an isolated Modal Sandbox — not an emulation layer.",
   },
   {
     title: "Live Preview",

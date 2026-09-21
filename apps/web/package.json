@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "@dai/db": "workspace:*",
-    "@dai/freestyle": "workspace:*",
     "@dai/nim": "workspace:*",
     "@dai/types": "workspace:*",
     "@dai/ui": "workspace:*",
