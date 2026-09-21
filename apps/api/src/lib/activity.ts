@@ -65,8 +65,14 @@ export function createActivityEmitter(input: {
   projectId: string;
   persist: (event: ActivityEvent) => void;
   publish: (frame: ActivityEvent) => void;
+  /**
+   * Highest `seq` already stored for this run. Events are keyed UNIQUE(run_id,
+   * seq), so a late write such as an undo must continue the sequence or it is
+   * silently dropped by the conflict rule.
+   */
+  startSeq?: number;
 }): { emit: Emitter; events: ActivityEvent[] } {
-  let seq = 0;
+  let seq = input.startSeq ?? 0;
   const events: ActivityEvent[] = [];
   return {
     events,

@@ -247,8 +247,8 @@ export async function executeReadOnly(
       const cwd = validatePath(String(args.cwd ?? WORKSPACE_ROOT));
       if (!cwd.valid || !cwd.normalized) return fail(cwd.error);
 
-      const charged = deps.budget.startExec();
-      if (!charged.ok) return { result: `Error: ${charged.message}`, success: false };
+      // Budget is charged once per tool call, by the loop. Charging here as well
+      // would bill a single command against the ceiling twice.
       const timeoutMs = deps.budget.commandTimeoutMs(args.timeoutMs ? Number(args.timeoutMs) : undefined);
       const executed: ExecResult = await workspace.exec(command, { cwd: cwd.normalized, timeoutMs });
       // Any command may have rewritten anything.
@@ -256,20 +256,14 @@ export async function executeReadOnly(
       return formatExecuted(command, executed);
     }
     case "git_status": {
-      const charged = deps.budget.startExec();
-      if (!charged.ok) return { result: `Error: ${charged.message}`, success: false };
       const status = await workspace.getGitStatus(WORKSPACE_ROOT);
       return { result: JSON.stringify(status, null, 2), success: true };
     }
     case "git_diff": {
-      const charged = deps.budget.startExec();
-      if (!charged.ok) return { result: `Error: ${charged.message}`, success: false };
       const diff = await workspace.getGitDiff(WORKSPACE_ROOT);
       return { result: JSON.stringify(diff, null, 2).slice(0, 100_000), success: true };
     }
     case "start_dev_server": {
-      const charged = deps.budget.startExec();
-      if (!charged.ok) return { result: `Error: ${charged.message}`, success: false };
       const port = Number(args.port ?? deps.previewPort);
       const command = String(args.command ?? "npm run dev");
       if (!Number.isInteger(port) || port < 1 || port > 65_535) return fail("a valid port is required");
@@ -404,11 +398,11 @@ export function resolveDesiredContent(
     }
     case "delete_file":
       return { ok: true, content: null, kind: "delete" };
-    case "rename_file": {
-      const newPath = String(args.newPath ?? "");
-      if (!newPath) return { ok: false, error: "newPath is required" };
-      return { ok: true, content: current, kind: "rename", fromPath: path };
-    }
+    case "rename_file":
+      // A rename needs two writes (create destination, delete source) and the
+      // source's content, so the loop applies it directly rather than routing
+      // through this single-path resolver.
+      return { ok: false, error: "rename_file is applied by the caller" };
     default:
       return { ok: false, error: `not a mutating tool: ${name}` };
   }

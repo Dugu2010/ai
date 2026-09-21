@@ -88,8 +88,6 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       return;
     }
 
-    // Attach compute BEFORE the SSE headers, so an unavailable runtime is a
-    // structured 503 rather than a half-open stream.
     if (!isRuntimeConfigured()) {
       res.status(503).json({
         error: "No execution runtime is configured. Set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET on the backend.",
@@ -97,23 +95,6 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       });
       return;
     }
-    try {
-      // Free check first: a project already over its storage allowance should
-      // not pay for a Sandbox to discover that again.
-      await assertWithinStorageQuota(project.id);
-      const acquired = await acquireWorkspace(project.id);
-      workspace = acquired.workspace;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Sandbox is not available. Please try again.";
-      res.status((error as { statusCode?: number }).statusCode ?? 503).json({ error: message, status: "error" });
-      return;
-    }
-
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no");
-    res.flushHeaders();
 
     const nimConfig = await resolveNimConfig(user.userId);
     const nim = new NIMClient(nimConfig.apiKey, nimConfig.baseURL, nimConfig.model);
@@ -127,18 +108,54 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
     }
     const history = await listMessages(convId);
 
+    const budget = new RuntimeBudget(DEFAULT_BUDGET_LIMITS);
+    const loop = new LoopDetector();
+
+    // The run row is written before compute is touched, so a run that never gets
+    // a Sandbox still leaves a record carrying the reason.
     const run = await createAgentRun({
       projectId: project.id,
       conversationId: convId,
       userId: user.userId,
       prompt: message,
-      budget: {},
-      sandboxId: workspace.sandboxId,
+      budget: budget.limits as unknown as Record<string, unknown>,
+      sandboxId: null,
     });
     runId = run.id;
 
-    const budget = new RuntimeBudget(DEFAULT_BUDGET_LIMITS);
-    const loop = new LoopDetector();
+    // Attach compute BEFORE the SSE headers, so an unavailable runtime is a
+    // structured 503 rather than a half-open stream.
+    let reattached = false;
+    try {
+      // Free check first: a project already over its storage allowance should
+      // not pay for a Sandbox to discover that again.
+      await assertWithinStorageQuota(project.id);
+      const acquired = await acquireWorkspace(project.id);
+      workspace = acquired.workspace;
+      reattached = acquired.reattached;
+      // Meter the truth: reattaching to a Sandbox that is already running starts
+      // no compute, so it consumes no activation. A run acquires exactly once,
+      // which is what actually bounds activations per run.
+      if (!reattached) budget.startActivation();
+      await updateAgentRun(run.id, { sandboxId: workspace.sandboxId });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Sandbox is not available. Please try again.";
+      await updateAgentRun(run.id, {
+        state: "failed",
+        outcome: "failed",
+        stopReason: reason,
+        lastError: reason,
+        finishedAt: new Date().toISOString(),
+      }).catch(() => undefined);
+      res.status((error as { statusCode?: number }).statusCode ?? 503).json({ error: reason, status: "error" });
+      return;
+    }
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
 
     const emitter = createActivityEmitter({
       runId: run.id,
@@ -153,6 +170,18 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
         for (const [name, payload] of frameForLegacyStream(frame)) writeSSE(res, name, payload);
       },
     });
+
+    // Reported as soon as the stream can carry it. Whether this run needed a new
+    // Sandbox or reused a live one is the cost fact the user is owed.
+    if (!reattached) {
+      emitter.emit("agent.runtime.requested", "Starting a runtime for this project", {}, "waiting");
+    }
+    emitter.emit(
+      "agent.runtime.started",
+      reattached ? "Reusing the project's running runtime" : "Runtime ready",
+      { sandboxId: workspace.sandboxId, reused: reattached, activations: budget.summary().activations },
+      "inspecting"
+    );
 
     await addMessage(convId, { role: "user", content: message, projectId: project.id });
 

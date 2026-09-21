@@ -1,9 +1,11 @@
 import { Router, Request, Response } from "express";
 import {
+  getCheckpoint,
   getProjectByUser,
   insertActivityEvent,
   listAgentRuns,
   listCheckpoints,
+  maxActivitySeq,
 } from "@dai/db";
 import type { Workspace } from "@dai/modal";
 import { requireAuth, getAuthUser } from "../lib/auth.js";
@@ -50,9 +52,13 @@ async function recordRestore(projectId: string, outcome: RestoreOutcome): Promis
   const runs = await listAgentRuns(projectId, 1);
   const run = runs[0];
   if (!run) return;
+  // Continue the run's own sequence: UNIQUE(run_id, seq) plus ON CONFLICT DO
+  // NOTHING meant an undo restarting at 1 was discarded instead of appended.
+  const startSeq = await maxActivitySeq(run.id);
   const emitter = createActivityEmitter({
     runId: run.id,
     projectId,
+    startSeq,
     persist: (event) => {
       void insertActivityEvent(run.id, projectId, event).catch(() => undefined);
     },
@@ -103,6 +109,33 @@ router.post("/:projectId/redo", async (req: Request, res: Response) => {
   } catch (error) {
     const status = (error as { statusCode?: number }).statusCode ?? 500;
     res.status(status).json({ error: error instanceof Error ? error.message : "Redo failed" });
+  }
+});
+
+/**
+ * One checkpoint in full, for the diff view.
+ *
+ * `listCheckpoints` deliberately returns summaries: a project with fifty
+ * checkpoints must not drag every stored pre-image across the wire to render a
+ * list. The detail endpoint is where the actual before/after text is fetched,
+ * bounded to the files a single checkpoint recorded.
+ */
+router.get("/:projectId/checkpoints/:checkpointId", async (req: Request, res: Response) => {
+  try {
+    const user = getAuthUser(req);
+    const project = await getProjectByUser(req.params.projectId!, user.userId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const checkpoint = await getCheckpoint(req.params.checkpointId!, project.id);
+    if (!checkpoint) {
+      res.status(404).json({ error: "Checkpoint not found" });
+      return;
+    }
+    res.json({ checkpoint });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : "Unable to read checkpoint" });
   }
 });
 

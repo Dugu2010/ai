@@ -197,6 +197,15 @@ export async function insertActivityEvent(
   );
 }
 
+/** Highest stored sequence number for a run, so a later writer can continue it. */
+export async function maxActivitySeq(runId: string): Promise<number> {
+  const res = await query<{ max_seq: string | number | null }>(
+    `SELECT MAX(seq) AS max_seq FROM activity_events WHERE run_id = $1`,
+    [runId]
+  );
+  return Number(res.rows[0]?.max_seq ?? 0) || 0;
+}
+
 export async function listActivityEvents(runId: string): Promise<ActivityEventRow[]> {
   const res = await query<ActivityEventRow>(
     `SELECT seq, event_type, state, title, detail, created_at FROM activity_events WHERE run_id = $1 ORDER BY seq ASC`,

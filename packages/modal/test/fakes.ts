@@ -39,10 +39,10 @@ export class FakeSandbox {
   };
   pollResult: number | null;
   waitUntilReadyThrows?: Error;
-  private files: Record<string, string>;
+  files: Record<string, string>;
   private dirs = new Set<string>();
-  private execHandlers: FakeSandboxOptions["execHandlers"];
-  private createTokenResult: { url: string; token: string };
+  execHandlers: FakeSandboxOptions["execHandlers"];
+  createTokenResult: { url: string; token: string };
 
   constructor(options: FakeSandboxOptions) {
     this.sandboxId = options.id;

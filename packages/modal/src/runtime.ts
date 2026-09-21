@@ -240,7 +240,7 @@ export class ModalWorkspace implements Workspace {
     let decoded: string;
     try {
       decoded = Buffer.from(result.stdout.slice(markerAt + READ_BATCH_MARKER.length).trim(), "base64").toString("utf8");
-    } catch (error) {
+    } catch {
       throw new RuntimeOperationError("Batch read returned unreadable data", "rejected");
     }
     const raw = JSON.parse(decoded) as Record<string, {

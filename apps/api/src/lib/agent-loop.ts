@@ -25,6 +25,7 @@ import type { AgentOutcome, AgentState } from "@dai/types";
 import { CheckpointCollector } from "./checkpoint-service.js";
 import type { Emitter } from "./activity.js";
 import { classifyCommand, errorSignature, parseFailureCount } from "./activity.js";
+import { validatePath } from "./validation.js";
 import type { LoopDetector } from "./loop-detector.js";
 import { callKey } from "./loop-detector.js";
 import type { RuntimeBudget } from "./runtime-policy.js";
@@ -39,6 +40,13 @@ import {
 } from "./agent-run.js";
 
 const MAX_TOOL_RESULT_CHARS = 8_000;
+
+/** One intended write, plus the bytes it must find in order to be allowed. */
+interface PlannedEdit {
+  path: string;
+  content: string | null;
+  expectCurrent: string | null;
+}
 
 export interface AgentLoopInput {
   projectId: string;
@@ -163,7 +171,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     });
 
     const reads: string[] = [];
-    const edits: Array<{ path: string; content: string | null }> = [];
+    const edits: PlannedEdit[] = [];
     const observations: Array<{ callKey: string; subject?: string; errorSignature?: string }> = [];
 
     for (const call of response.toolCalls) {
@@ -359,25 +367,46 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       call: ToolCall,
       args: Record<string, unknown>
     ): Promise<ToolOutcomeText> {
-      const target = normaliseWorkspacePath(String(args.path ?? args.newPath ?? ""));
-      if (!target) return { result: "Error: a path inside /workspace is required", success: false };
+      const isRename = call.name === "rename_file";
+      // rename_file declares oldPath/newPath, so reading args.path here would
+      // silently target the empty string.
+      const sourceRaw = isRename ? String(args.oldPath ?? "") : String(args.path ?? "");
+      const targetRaw = isRename ? String(args.newPath ?? "") : String(args.path ?? "");
 
-      const current = await cachedRead(target);
-      const desired = resolveDesiredContent(call.name, args, current);
-      if (!desired.ok) return { result: `Error: ${desired.error}`, success: false };
+      const source = confinedPath(sourceRaw);
+      if (!source) return { result: `Error: not a valid workspace path: ${sourceRaw}`, success: false };
+      const target = confinedPath(targetRaw);
+      if (!target) return { result: `Error: not a valid workspace path: ${targetRaw}`, success: false };
 
-      collector.plan({ path: target, kind: desired.kind, newContent: desired.content, fromPath: desired.fromPath });
-      if (desired.fromPath) {
-        collector.plan({ path: desired.fromPath, kind: "rename", newContent: null });
+      if (isRename) {
+        // A rename needs two writes and needs the SOURCE's bytes, so it is not
+        // routed through resolveDesiredContent, which models one path.
+        const current = await cachedRead(source);
+        if (current === null) return { result: "Error: the file to rename does not exist", success: false };
+        const destination = await cachedRead(target);
+        if (destination !== null) return { result: `Error: ${target} already exists`, success: false };
+
+        collector.plan({ path: target, kind: "create", newContent: current });
+        collector.plan({ path: source, kind: "delete", newContent: null });
+        // expectCurrent is what makes the batched apply safe: the runtime refuses
+        // to write any path whose current bytes it does not already own.
+        edits.push({ path: target, content: current, expectCurrent: null });
+        edits.push({ path: source, content: null, expectCurrent: current });
+      } else {
+        const current = await cachedRead(target);
+        const desired = resolveDesiredContent(call.name, { ...args, path: target }, current);
+        if (!desired.ok) return { result: `Error: ${desired.error}`, success: false };
+        collector.plan({ path: target, kind: desired.kind, newContent: desired.content });
+        edits.push({ path: target, content: desired.content, expectCurrent: current });
       }
-      edits.push({ path: target, content: desired.content });
-      if (desired.kind === "delete") cache.invalidateAll();
+
+      cache.invalidateAll();
       pendingLabel ??= describeChanges([{ path: target }]);
       return { result: describePlanned(call.name, target), success: true };
     }
 
     async function applyEdits(
-      requested: Array<{ path: string; content: string | null }>
+      requested: PlannedEdit[]
     ): Promise<{ changed: number; bytes: number; paths: string[] }> {
       const gate = budget.startExec();
       if (!gate.ok) {
@@ -391,7 +420,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       const mutations: FileMutation[] = requested.map((edit) => ({
         path: edit.path,
         content: edit.content,
-        expectCurrent: null,
+        expectCurrent: edit.expectCurrent,
       }));
 
       let results;
@@ -494,13 +523,15 @@ function shortName(path: string): string {
   return path.split("/").pop() ?? path;
 }
 
-/** Confine to the workspace before it reaches the checkpoint layer at all. */
-function normaliseWorkspacePath(raw: string): string | null {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  if (!trimmed.startsWith("/workspace")) return null;
-  if (trimmed.includes("..")) return null;
-  return trimmed;
+/**
+ * Confine a tool-supplied path before it reaches the checkpoint layer or the
+ * runtime. Delegates to the same validator the routes use: a bare
+ * `startsWith("/workspace")` would accept `/workspacex` and would not decode
+ * traversal sequences.
+ */
+function confinedPath(raw: string): string | null {
+  const result = validatePath(raw);
+  return result.valid ? result.normalized : null;
 }
 
 function mutationSubject(name: string, args: Record<string, unknown>): string | undefined {
