@@ -20,7 +20,6 @@
       "@dai/db": ["packages/db/src/index.ts"],
       "@dai/modal": ["packages/modal/src/index.ts"],
       "@dai/nim": ["packages/nim/src/index.ts"],
-      "@dai/ui": ["packages/ui/src/index.ts"]
     }
   }
 }

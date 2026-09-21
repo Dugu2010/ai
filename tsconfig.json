@@ -5,7 +5,6 @@
     { "path": "packages/db" },
     { "path": "packages/modal" },
     { "path": "packages/nim" },
-    { "path": "packages/ui" },
     { "path": "apps/web" }
   ]
 }
