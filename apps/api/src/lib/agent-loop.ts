@@ -61,6 +61,12 @@ export interface AgentLoopInput {
   }) => Promise<void>;
   /** Checked between iterations so Stop ends the run cleanly, not mid-command. */
   aborted?: () => boolean;
+  /**
+   * Called with each piece of assistant prose as it arrives. Without this only
+   * the last turn's text would reach the chat, so a model that narrates "I will
+   * add a README" before editing would appear silent and then dump a summary.
+   */
+  onAssistantText?: (text: string) => void;
 }
 
 export interface AgentLoopResult {
@@ -142,6 +148,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     if (response.content) {
       finalContent = response.content;
       contentStreamed = true;
+      input.onAssistantText?.(response.content);
     }
     if (response.toolCalls.length === 0) break;
 

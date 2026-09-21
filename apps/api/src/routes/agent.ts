@@ -181,6 +181,7 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       loop,
       previewPort: runtimeDefaultPort(),
       aborted: () => isCancelled(run.id),
+      onAssistantText: (text) => writeSSE(res, "assistant_delta", { text }),
       recordToolCall: async (entry) => {
         await addMessage(convId, {
           role: "tool",
@@ -197,7 +198,9 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
     // the quota stays honest without an extra activation later.
     await recordWorkspaceUsage(workspace, project.id).catch(() => null);
 
-    if (result.contentStreamed && result.content) {
+    // A tool-only turn produces no prose at all, so summarise it here; anything
+    // the model actually said has already been streamed by onAssistantText.
+    if (!result.contentStreamed && result.content) {
       writeSSE(res, "assistant_delta", { text: result.content });
     }
 
