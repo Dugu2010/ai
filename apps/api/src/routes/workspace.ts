@@ -1,7 +1,7 @@
 import { Router, Request, Response } from "express";
 import { getProjectByUser, updateProject } from "@dai/db";
 import { requireAuth, getAuthUser } from "../lib/auth.js";
-import { validatePath, validateCommandOptions, MAX_REQUEST_BODY_SIZE, MAX_OUTPUT_SIZE, MAX_FILE_READ_SIZE, MAX_TIMEOUT_MS } from "../lib/validation.js";
+import { validatePath, MAX_REQUEST_BODY_SIZE, MAX_FILE_READ_SIZE } from "../lib/validation.js";
 import { acquireWorkspace, isRuntimeConfigured, releaseWorkspace, runtimeDefaultPort, runtimeState, terminateRuntime } from "../lib/runtime.js";
 import { MAX_ACTIVE_SANDBOXES as MAX_ACTIVE_RUNTIME_PROJECTS } from "../lib/sandbox-queue.js";
 import type { Workspace } from "@dai/modal";
@@ -185,54 +185,6 @@ router.get("/:projectId/file", async (req: Request, res: Response) => {
     res.send(content);
   } catch (error: any) {
     console.error("[workspace:file]", error.message);
-    res.status(error.statusCode || 500).json({ error: error.message });
-  } finally {
-    if (workspace) releaseWorkspace(workspace);
-  }
-});
-
-// POST /api/workspace/:projectId/command — { command, cwd?, timeoutMs? }
-// Internal endpoint used by the agent tooling; never exposed as a user terminal.
-router.post("/:projectId/command", async (req: Request, res: Response) => {
-  let workspace: Workspace | null = null;
-  try {
-    if (runtimeNotConfigured(res)) return;
-    const user = getAuthUser(req);
-    const contentLength = req.headers["content-length"];
-    if (contentLength && parseInt(contentLength) > MAX_REQUEST_BODY_SIZE) {
-      res.status(413).json({ error: "Request body exceeds maximum size" });
-      return;
-    }
-    const ctx = await workspaceForProject(req.params.projectId!, user.userId);
-    if (!ctx) {
-      res.status(404).json({ error: "Project not found" });
-      return;
-    }
-    if ("error" in ctx) {
-      res.status(ctx.status).json({ error: ctx.error });
-      return;
-    }
-    workspace = ctx.workspace;
-    const { command, cwd, timeoutMs } = req.body ?? {};
-    const validation = validateCommandOptions({ command, cwd, timeoutMs });
-    if (!validation.valid) {
-      res.status(400).json({ error: validation.error });
-      return;
-    }
-    const cwdValidation = validatePath(cwd || "/workspace");
-    if (!cwdValidation.valid || !cwdValidation.normalized) {
-      res.status(400).json({ error: cwdValidation.error || "Invalid working directory" });
-      return;
-    }
-    const effectiveTimeout = Math.min(Number(timeoutMs) || MAX_TIMEOUT_MS, MAX_TIMEOUT_MS);
-    const result = await workspace.exec(command, { cwd: cwdValidation.normalized, timeoutMs: effectiveTimeout });
-    if (JSON.stringify(result).length > MAX_OUTPUT_SIZE) {
-      res.status(413).json({ error: "Output exceeds maximum size" });
-      return;
-    }
-    res.json(result);
-  } catch (error: any) {
-    console.error("[workspace:command]", error.message);
     res.status(error.statusCode || 500).json({ error: error.message });
   } finally {
     if (workspace) releaseWorkspace(workspace);
