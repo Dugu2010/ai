@@ -114,6 +114,7 @@ export async function ensureSchema(): Promise<void> {
     );
 
     -- Migration for existing databases created before these columns existed.
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS project_id UUID;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS tool_name TEXT;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS tool_args JSONB;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS tool_result JSONB;
