@@ -118,8 +118,6 @@ export async function ensureSchema(): Promise<void> {
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS tool_name TEXT;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS tool_args JSONB;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS tool_result JSONB;
-    ALTER TABLE checkpoint_files ADD COLUMN IF NOT EXISTS content_before_key TEXT;
-    ALTER TABLE checkpoint_files ADD COLUMN IF NOT EXISTS content_after_key TEXT;
 
     CREATE TABLE IF NOT EXISTS user_settings (
       user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -212,6 +210,13 @@ export async function ensureSchema(): Promise<void> {
       reversible BOOLEAN NOT NULL DEFAULT true,
       skip_reason TEXT
     );
+
+    -- Databases created before the key columns existed. These ALTERs must come
+    -- after the CREATE above: a fresh schema runs this script top to bottom, and
+    -- an ALTER naming a table that has not been created yet aborts the whole
+    -- startup transaction.
+    ALTER TABLE checkpoint_files ADD COLUMN IF NOT EXISTS content_before_key TEXT;
+    ALTER TABLE checkpoint_files ADD COLUMN IF NOT EXISTS content_after_key TEXT;
 
     -- Redo stack: which checkpoints a user has undone, so redo can re-apply.
     ALTER TABLE checkpoints ADD COLUMN IF NOT EXISTS undone_at TIMESTAMPTZ;
