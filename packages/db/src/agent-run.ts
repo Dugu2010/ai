@@ -8,6 +8,7 @@
  */
 
 import { query } from "./client.js";
+import { checkpointImageStore } from "./checkpoint-images.js";
 
 /* ------------------------------- agent runs ------------------------------- */
 
@@ -256,6 +257,8 @@ interface CheckpointRow {
 interface CheckpointFileRow {
   path: string;
   change_kind: string;
+  content_before_key?: string | null;
+  content_after_key?: string | null;
   content_before: string | null;
   content_after: string | null;
   existed_before: boolean;
@@ -293,18 +296,34 @@ export async function createCheckpoint(input: {
     [input.projectId, input.runId, input.label, input.reversible, input.note ?? null]
   );
   const checkpointId = res.rows[0]!.id;
-  for (const file of input.files) {
+  const images = checkpointImageStore();
+  for (const [index, file] of input.files.entries()) {
+    // The store is asked first and the row records the key it returned, so a row
+    // always names where its own bytes went rather than the reader having to
+    // re-derive a position. Storing the key inline and the text inline together
+    // would double-write the same content on every checkpoint.
+    const before =
+      images && file.contentBefore !== null
+        ? await images.put(checkpointId, index, "before", file.contentBefore)
+        : null;
+    const after =
+      images && file.contentAfter !== null
+        ? await images.put(checkpointId, index, "after", file.contentAfter)
+        : null;
     await query(
       `INSERT INTO checkpoint_files
          (checkpoint_id, path, change_kind, content_before, content_after,
+          content_before_key, content_after_key,
           existed_before, size_before, size_after, reversible, skip_reason)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [
         checkpointId,
         file.path,
         file.changeKind,
-        file.contentBefore,
-        file.contentAfter,
+        before ? null : file.contentBefore,
+        after ? null : file.contentAfter,
+        before?.key ?? null,
+        after?.key ?? null,
         file.existedBefore,
         file.sizeBefore,
         file.sizeAfter,
@@ -317,13 +336,35 @@ export async function createCheckpoint(input: {
 }
 
 async function loadFiles(checkpointId: string): Promise<CheckpointFileRecord[]> {
-  const res = await query<CheckpointFileRow>(
-    `SELECT path, change_kind, content_before, content_after, existed_before,
-            size_before, size_after, reversible, skip_reason
+  const res = await query<CheckpointFileRow & { content_before_key: string | null; content_after_key: string | null }>(
+    `SELECT path, change_kind, content_before, content_after, content_before_key, content_after_key,
+            existed_before, size_before, size_after, reversible, skip_reason
        FROM checkpoint_files WHERE checkpoint_id = $1 ORDER BY id ASC`,
     [checkpointId]
   );
-  return res.rows.map(mapFile);
+  const images = checkpointImageStore();
+  const fetch = async (key: string | null, inline: string | null): Promise<string | null> => {
+    if (!key) return inline;
+    if (!images) {
+      // Deliberately loud. Returning null here would tell the undo path "the
+      // pre-image was empty", and an undo acting on that would delete a file the
+      // user still has. A missing store is a misconfiguration, not an absence.
+      throw new Error(
+        `Checkpoint ${checkpointId} stores its file images externally, but no image store is configured.`
+      );
+    }
+    return images.get(key);
+  };
+  const files: CheckpointFileRecord[] = [];
+  for (const row of res.rows) {
+    const base = mapFile(row);
+    files.push({
+      ...base,
+      contentBefore: await fetch(row.content_before_key, base.contentBefore),
+      contentAfter: await fetch(row.content_after_key, base.contentAfter),
+    });
+  }
+  return files;
 }
 
 /**
@@ -399,6 +440,26 @@ export async function setCheckpointStatus(
   );
 }
 
+/**
+ * Whether a checkpoint in the given state exists, without loading it.
+ *
+ * The undo/redo affordances in the UI ask only "is there anything to step to",
+ * and `getCheckpoint` would answer by reading every stored pre- and post-image
+ * of every file the checkpoint touched.
+ */
+export async function hasCheckpointWithStatus(
+  projectId: string,
+  status: "applied" | "undone"
+): Promise<boolean> {
+  const res = await query<{ present: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM checkpoints WHERE project_id = $1 AND status = $2 LIMIT 1
+     ) AS present`,
+    [projectId, status]
+  );
+  return Boolean(res.rows[0]?.present);
+}
+
 /** Most recent checkpoint still awaiting undo. */
 export async function findLatestAppliedCheckpoint(
   projectId: string
@@ -416,7 +477,7 @@ export async function findLatestAppliedCheckpoint(
   return getCheckpoint(row.id, projectId);
 }
 
-/** Next undone checkpoint, for redo. */
+/** Next checkpoint to re-apply, for redo: the earliest undone one in history. */
 export async function findNextUndoneCheckpoint(
   projectId: string
 ): Promise<CheckpointRecord | null> {
@@ -424,7 +485,7 @@ export async function findNextUndoneCheckpoint(
     `SELECT id, project_id, run_id, label, status, reversible, note, created_at, undone_at
        FROM checkpoints
       WHERE project_id = $1 AND status = 'undone'
-      ORDER BY undone_at ASC NULLS LAST
+      ORDER BY created_at ASC
       LIMIT 1`,
     [projectId]
   );
@@ -433,9 +494,23 @@ export async function findNextUndoneCheckpoint(
   return getCheckpoint(row.id, projectId);
 }
 
+/** Ids of every checkpoint for a project, so their images can be reclaimed. */
+export async function listCheckpointIds(projectId: string): Promise<string[]> {
+  const res = await query<{ id: string }>(`SELECT id FROM checkpoints WHERE project_id = $1`, [projectId]);
+  return res.rows.map((row) => row.id);
+}
+
 export async function deleteCheckpointsForProject(projectId: string): Promise<void> {
   // Rows cascade from checkpoints -> checkpoint_files, and from projects ->
   // checkpoints, so this is a guard for callers that purge before deleting the
-  // project itself.
+  // project itself. The cascade cannot reach object storage, so the images are
+  // deleted here first: otherwise they would outlive every row naming them and
+  // quietly hold the storage allowance forever.
+  const images = checkpointImageStore();
+  if (images) {
+    for (const id of await listCheckpointIds(projectId)) {
+      await images.deleteCheckpoint(id).catch(() => undefined);
+    }
+  }
   await query(`DELETE FROM checkpoints WHERE project_id = $1`, [projectId]);
 }

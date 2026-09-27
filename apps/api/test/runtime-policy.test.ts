@@ -17,13 +17,33 @@ const ALL_OPERATIONS: RuntimeOperation[] = [
   "fs.write",
   "fs.delete",
   "fs.rename",
-  "fs.search",
+  "fs.search_name",
+  "fs.search_content",
   "command.exec",
   "dev_server.start",
   "preview.url",
   "git.status",
   "git.diff",
   "checkpoint.restore",
+];
+
+/**
+ * Everything that ends up as a `runCommand` inside the sandbox, and therefore
+ * spends Active CPU. `fs.readdir`, `rm`, `rename` and `mkdir` are on this list
+ * because the SDK implements them with find/rm/mv/mkdir — verified against the
+ * installed `dist/filesystem.js`, not against what "file API" sounds like it
+ * should mean.
+ */
+const METERED: RuntimeOperation[] = [
+  "command.exec",
+  "dev_server.start",
+  "git.status",
+  "git.diff",
+  "fs.search_name",
+  "fs.search_content",
+  "fs.list",
+  "fs.delete",
+  "fs.rename",
 ];
 
 function limits(overrides: Partial<typeof DEFAULT_BUDGET_LIMITS>) {
@@ -35,38 +55,51 @@ describe("needsRuntime classification", () => {
     for (const operation of ALL_OPERATIONS) {
       const decision = needsRuntime(operation);
       expect(decision.operation).toBe(operation);
-      expect(["free", "runtime"]).toContain(decision.cost);
+      expect(["r2", "control_plane", "sandbox_exec"]).toContain(decision.location);
+      expect(typeof decision.requiresRunningSandbox).toBe("boolean");
+      expect(typeof decision.activeCpuCost).toBe("boolean");
       expect(decision.reason.length).toBeGreaterThan(10);
     }
   });
 
-  it("says workspace and command operations cost compute", () => {
+  it("charges Active CPU for exactly the operations that run a command", () => {
     for (const operation of ALL_OPERATIONS) {
-      if (operation === "preview.url") continue;
-      const decision = needsRuntime(operation);
-      expect(decision.cost).toBe("runtime");
-      expect(decision.requiresRuntime).toBe(true);
-      // The rationale is a provider fact, and it is surfaced verbatim to the
-      // user, so it must name the reason rather than shrug.
-      expect(decision.reason).toMatch(/Volume|Sandbox/);
+      expect(needsRuntime(operation).activeCpuCost).toBe(METERED.includes(operation));
     }
   });
 
-  it("treats a preview token as free of commands even though it needs an attached Sandbox", () => {
-    const decision = needsRuntime("preview.url");
-    // `cost: "free"` means "consumes no exec and no activation". The token still
-    // comes from a live Sandbox handle, so requiresRuntime stays true: a free
-    // operation must never be reported as runnable with no compute attached.
-    expect(decision.cost).toBe("free");
-    expect(decision.requiresRuntime).toBe(true);
-    expect(decision.reason).toMatch(/control plane/);
+  it("keeps the two byte transfers out of the metered budget", () => {
+    // Reads and writes are the HTTP data plane; they are the reason a file-only
+    // task can be long without being expensive.
+    for (const operation of ["fs.read", "fs.write"] as const) {
+      const decision = needsRuntime(operation);
+      expect(decision.activeCpuCost).toBe(false);
+      expect(decision.cost).toBe("free");
+    }
   });
 
-  it("never marks checkpoint restore as free, despite the docs listing it as Postgres-side", () => {
-    // Undo is one batched command, so it is charged like any other write. This
-    // pins the classification against someone "optimising" it to free.
-    expect(needsRuntime("checkpoint.restore").cost).toBe("runtime");
-    expect(needsRuntime("fs.read").cost).toBe("runtime");
+  it("does not pretend a listing is free because it came from a file API", async () => {
+    const decision = needsRuntime("fs.list");
+    expect(decision.activeCpuCost).toBe(true);
+    expect(decision.reason).toMatch(/find|command/);
+  });
+
+  it("serves a cold read with no sandbox running at all", () => {
+    const decision = needsRuntime("fs.read");
+    expect(decision.location).toBe("r2");
+    expect(decision.requiresRunningSandbox).toBe(false);
+    // Every other workspace operation needs the machine awake, even when it
+    // spends nothing: an awake VM is itself the billable thing.
+    for (const operation of ALL_OPERATIONS.filter((entry) => entry !== "fs.read")) {
+      expect(needsRuntime(operation).requiresRunningSandbox).toBe(true);
+    }
+  });
+
+  it("derives cost from the axes instead of stating it a third time", () => {
+    for (const operation of ALL_OPERATIONS) {
+      const decision = needsRuntime(operation);
+      expect(decision.cost).toBe(decision.activeCpuCost ? "runtime" : "free");
+    }
   });
 
   it("does not mark anything degraded by default", () => {
@@ -109,9 +142,36 @@ describe("exec and runtime-seconds ceilings", () => {
     expect(budget.exhausted).toBe("exec_calls");
     const blocked = budget.startExec();
     expect(blocked.ok).toBe(false);
-    if (!blocked.ok) expect(blocked.message).toMatch(/Exec-call budget exhausted/);
+    if (!blocked.ok) expect(blocked.message).toMatch(/Command budget exhausted/);
     expect(budget.summary().exhausted).toBe("exec_calls");
     expect(budget.execCalls).toBe(2);
+  });
+
+  it("does not let a file operation spend the command budget", () => {
+    // The single most important line in the cost model: on this provider a read
+    // is not a command, so a task that only touches files cannot be stopped for
+    // running out of compute it never used.
+    const budget = new RuntimeBudget(limits({ maxExecCallsPerRun: 1, maxFileOpsPerRun: 100 }));
+    for (let index = 0; index < 5; index += 1) expect(budget.startFileOperation().ok).toBe(true);
+    expect(budget.exhausted).toBeNull();
+    expect(budget.execCalls).toBe(0);
+    expect(budget.fileOps).toBe(5);
+    // The one real command this run is allowed is still available.
+    expect(budget.startExec().ok).toBe(true);
+    expect(budget.summary().exhausted).toBe("exec_calls");
+  });
+
+  it("caps file operations on their own ceiling, with wording that does not invite a command", () => {
+    const budget = new RuntimeBudget(limits({ maxFileOpsPerRun: 1, maxExecCallsPerRun: 100 }));
+    expect(budget.startFileOperation().ok).toBe(true);
+    const blocked = budget.startFileOperation();
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) {
+      expect(blocked.message).toMatch(/file operations/);
+      expect(blocked.message).not.toMatch(/command/);
+    }
+    // Commands remain available: the two ceilings are independent.
+    expect(budget.startExec().ok).toBe(true);
   });
 
   it("exhausts on wall-clock runtime and names that instead", () => {

@@ -66,3 +66,72 @@ describe("the default API run cannot spend money", () => {
     expect(workspace.execs).toHaveLength(1);
   });
 });
+
+describe("the run route cannot cancel its own run", () => {
+  /**
+   * `registerCancellation` means "the user asked this run to stop" — the loop
+   * checks it before its first statement. A route that registered the id it was
+   * about to run ended every single task with "Stopped by you." before it did any
+   * work, and nothing else in the suite would notice, because the loop is
+   * correct and the stop route is correct; only the wiring between them was not.
+   */
+  const route = read("../src/routes/agent.ts");
+
+  it("never registers the run it is starting as cancelled", () => {
+    expect(route).not.toMatch(/registerCancellation\(\s*run\.id\s*\)/);
+  });
+
+  it("clears the flag and the watcher when the handler finishes", () => {
+    // The `cancelled` set has no sweeper: every producer must be matched by the
+    // owner's cleanup or a stopped run leaks an id for the life of the process.
+    expect(route).toMatch(/unregisterCancellation\(\s*runId\s*\)/);
+    expect(route).toMatch(/res\.removeListener\(\s*"close",\s*onClientGone\s*\)/);
+  });
+
+  it("still hands the loop a live cancellation probe", () => {
+    expect(route).toMatch(/aborted:\s*\(\)\s*=>\s*isCancelled\(\s*run\.id\s*\)/);
+  });
+});
+
+describe("a cold read is answered before compute is acquired", () => {
+  /**
+   * The whole cost argument for the R2 mirror is that browsing a stopped project
+   * boots nothing. If a handler ever asks for a workspace first, the mirror stops
+   * saving money and starts being a stale second copy that nobody notices —
+   * nothing else in the suite fails, because both calls individually work.
+   *
+   * Asserted against the source because `vi.mock` with a relative specifier does
+   * not intercept `src/lib/*` in this vitest setup (only bare package specifiers
+   * like `@dai/db` are replaced), so the route cannot be driven with the
+   * runtime module stubbed.
+   */
+  const workspaceRoute = read("../src/routes/workspace.ts");
+  const handlers = workspaceRoute
+    .split(/(?=^router\.)/m)
+    .filter((segment) => segment.startsWith("router.") && segment.includes("await coldMirrorProject"));
+
+  it("has more than one cold-capable handler, so the wiring above is real", () => {
+    expect(handlers.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it.each(handlers.map((segment) => [segment.split("\n")[0]?.trim().slice(0, 60) ?? "?", segment]))(
+    "%s",
+    (_label, segment) => {
+      const cold = segment.indexOf("coldMirrorProject");
+      const compute = segment.indexOf("await workspaceForProject");
+      expect(cold).toBeGreaterThan(-1);
+      expect(compute, "handler acquires compute without ever consulting the mirror").toBeGreaterThan(-1);
+      expect(cold).toBeLessThan(compute);
+    }
+  );
+
+  it("answers from the mirror and returns, rather than falling through to a sandbox", () => {
+    // Every cold branch must exit its handler; one that "falls through to be
+    // safe" would boot a machine on every cold read and still look correct.
+    for (const segment of handlers) {
+      const cold = segment.slice(segment.indexOf("coldMirrorProject"));
+      const body = cold.slice(0, cold.indexOf("await workspaceForProject"));
+      expect(body).toMatch(/return;/);
+    }
+  });
+});

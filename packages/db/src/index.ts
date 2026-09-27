@@ -147,6 +147,7 @@ export async function createProject(
     sandboxId: row.sandbox_id ?? null,
     runtimeProvider: row.runtime_provider ?? null,
     runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
+    runtimeResourceTier: Number(row.runtime_resource_tier ?? 0),
     legacySandboxId: row.legacy_sandbox_id ?? null,
     runtimeMigrationStatus: row.runtime_migration_status ?? null,
     workspaceBytes:
@@ -188,6 +189,7 @@ export async function getProject(id: string): Promise<Project | null> {
     sandboxId: row.sandbox_id ?? null,
     runtimeProvider: row.runtime_provider ?? null,
     runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
+    runtimeResourceTier: Number(row.runtime_resource_tier ?? 0),
     legacySandboxId: row.legacy_sandbox_id ?? null,
     runtimeMigrationStatus: row.runtime_migration_status ?? null,
     workspaceBytes:
@@ -229,6 +231,7 @@ export async function getProjectByUser(id: string, userId: string): Promise<Proj
     sandboxId: row.sandbox_id ?? null,
     runtimeProvider: row.runtime_provider ?? null,
     runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
+    runtimeResourceTier: Number(row.runtime_resource_tier ?? 0),
     legacySandboxId: row.legacy_sandbox_id ?? null,
     runtimeMigrationStatus: row.runtime_migration_status ?? null,
     workspaceBytes:
@@ -268,6 +271,7 @@ export async function listProjects(userId: string): Promise<Project[]> {
     sandboxId: row.sandbox_id ?? null,
     runtimeProvider: row.runtime_provider ?? null,
     runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
+    runtimeResourceTier: Number(row.runtime_resource_tier ?? 0),
     legacySandboxId: row.legacy_sandbox_id ?? null,
     runtimeMigrationStatus: row.runtime_migration_status ?? null,
     workspaceBytes:
@@ -480,6 +484,7 @@ export async function updateProject(
     sandboxId?: string | null;
     runtimeProvider?: string | null;
     runtimeVolumeSubPath?: string | null;
+    runtimeResourceTier?: number | null;
     legacySandboxId?: string | null;
     runtimeMigrationStatus?: string | null;
     workspaceBytes?: number | null;
@@ -511,6 +516,7 @@ export async function updateProject(
   if (updates.sandboxId !== undefined) add("sandbox_id", updates.sandboxId);
   if (updates.runtimeProvider !== undefined) add("runtime_provider", updates.runtimeProvider);
   if (updates.runtimeVolumeSubPath !== undefined) add("runtime_volume_subpath", updates.runtimeVolumeSubPath);
+  if (updates.runtimeResourceTier !== undefined) add("runtime_resource_tier", updates.runtimeResourceTier);
   if (updates.legacySandboxId !== undefined) add("legacy_sandbox_id", updates.legacySandboxId);
   if (updates.runtimeMigrationStatus !== undefined) add("runtime_migration_status", updates.runtimeMigrationStatus);
   if (updates.workspaceBytes !== undefined) add("workspace_bytes", updates.workspaceBytes);
@@ -539,6 +545,7 @@ export async function updateProject(
     sandboxId: row.sandbox_id ?? null,
     runtimeProvider: row.runtime_provider ?? null,
     runtimeVolumeSubPath: row.runtime_volume_subpath ?? null,
+    runtimeResourceTier: Number(row.runtime_resource_tier ?? 0),
     legacySandboxId: row.legacy_sandbox_id ?? null,
     runtimeMigrationStatus: row.runtime_migration_status ?? null,
     workspaceBytes:
@@ -617,6 +624,37 @@ export async function getActiveConversation(projectId: string): Promise<Conversa
   };
 }
 
+/**
+ * A conversation, but only if it belongs to the given project. Used to reject a
+ * client-supplied conversation id before its message history is read or written.
+ */
+export async function getConversationForProject(
+  conversationId: string,
+  projectId: string
+): Promise<Conversation | null> {
+  const res = await query<{
+    id: string;
+    project_id: string;
+    title: string;
+    model: string;
+    created_at: string;
+    updated_at: string;
+  }>(
+    `SELECT id, project_id, title, model, created_at, updated_at FROM conversations WHERE id = $1 AND project_id = $2`,
+    [conversationId, projectId]
+  );
+  if (!res.rows[0]) return null;
+  const row = res.rows[0];
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    title: row.title,
+    model: row.model,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 export async function addMessage(
   conversationId: string,
   {
@@ -650,7 +688,7 @@ export async function addMessage(
     total_tokens: number | null;
     created_at: string;
   }>(
-    `INSERT INTO messages (conversation_id, project_id, role, content, tool_name, tool_args, tool_result, prompt_tokens, completion_tokens, total_tokens) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id, conversation_id, role, content, tool_name, tool_args, tool_result, prompt_tokens, completion_tokens, total_tokens, created_at`,
+    `INSERT INTO messages (conversation_id, project_id, role, content, tool_name, tool_args, tool_result, prompt_tokens, completion_tokens, total_tokens) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id, conversation_id, role, content, tool_name, tool_args, tool_result, prompt_tokens, completion_tokens, total_tokens, created_at`,
     [
       conversationId,
       projectId ?? null,
@@ -784,3 +822,9 @@ export type { PoolClient };
 
 /* Agent runs, activity timeline and undo checkpoints. */
 export * from "./agent-run.js";
+
+/* External storage seam for checkpoint file images. */
+export * from "./checkpoint-images.js";
+
+/* Compute ledger: what a month of sandboxes has cost, and what it may still spend. */
+export * from "./runtime-usage.js";

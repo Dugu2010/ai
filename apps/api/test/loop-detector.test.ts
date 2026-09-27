@@ -95,7 +95,16 @@ describe("repeated_failure", () => {
     ]);
     const verdict = detector.assess();
     expect(verdict.kind).toBe("repeated_failure");
-    expect(verdict.summary).toMatch(/recurred three times/);
+    expect(verdict.summary).toMatch(/recurred 3 times/);
+  });
+
+  it("states the configured threshold rather than a hardcoded word", () => {
+    const detector = new LoopDetector({ failureThreshold: 2 });
+    recordAll(detector, [
+      step({ callKey: "run_command::command=npm test", errorSignature: signature }),
+      step({ callKey: "run_command::command=npm run build", errorSignature: signature }),
+    ]);
+    expect(detector.assess().summary).toMatch(/recurred 2 times/);
   });
 
   it("does not fire when each attempt fails differently", () => {

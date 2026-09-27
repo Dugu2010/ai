@@ -7,8 +7,12 @@ import { ENCRYPTION_KEY } from "./env.js";
  * tampering with any part fails decryption.
  */
 
+// A committed default would be the only thing standing between the repo and
+// every stored provider key, so a missing key fails instead of silently
+// weakening to it.
 function key(): Buffer {
-  const raw = ENCRYPTION_KEY() || "dai-development-encryption-key-32byte";
+  const raw = ENCRYPTION_KEY();
+  if (!raw) throw new Error("DAI_API_KEY_ENCRYPTION_KEY is not set");
   return crypto.createHash("sha256").update(raw).digest();
 }
 

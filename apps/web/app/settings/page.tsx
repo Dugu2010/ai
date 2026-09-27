@@ -31,7 +31,8 @@ interface SettingsResponse {
 }
 
 interface ModelsResponse {
-  models?: string[];
+  /** The API serves provider model records, not bare ids. */
+  models?: Array<{ id?: string; owned_by?: string }>;
   source?: string;
 }
 
@@ -118,7 +119,11 @@ export default function SettingsPage() {
     // The provider list is a convenience; the form works without it.
     try {
       const models = await requestJson<ModelsResponse>("/api/settings/models");
-      setProviderModels(asArray<string>(models?.models));
+      setProviderModels(
+        asArray<{ id?: string }>(models?.models)
+          .map((entry) => (typeof entry?.id === "string" ? entry.id : ""))
+          .filter(Boolean)
+      );
     } catch {
       setProviderModels([]);
     }

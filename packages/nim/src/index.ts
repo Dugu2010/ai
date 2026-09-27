@@ -53,6 +53,12 @@ export interface ChatResponse {
   finishReason: string | null;
 }
 
+/**
+ * A request that never returns must still end: the caller is holding a Modal
+ * Sandbox while it waits, so an unbounded model call is an unbounded bill.
+ */
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+
 export class NIMClient {
   private apiKey: string;
   private baseURL: string;
@@ -134,6 +140,8 @@ export class NIMClient {
       body.max_tokens = maxTokens;
     }
 
+    // A caller that passes no deadline still gets one: while this promise is
+    // pending the run is holding an attached Sandbox.
     const response = await fetch(`${this.baseURL}/chat/completions`, {
       method: "POST",
       headers: {
@@ -141,14 +149,22 @@ export class NIMClient {
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
-      signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
+      signal: AbortSignal.timeout(timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS),
     });
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => "");
       const error = new Error(`NIM API error: ${response.status} ${response.statusText}`);
       (error as any).status = response.status;
-      (error as any).response = { data: errorText };
+      // The retry classifier below reads `response.data.error.code`, so hand it
+      // the parsed body rather than the raw text it can never index into.
+      let data: unknown = errorText;
+      try {
+        data = JSON.parse(errorText);
+      } catch {
+        // A non-JSON error body stays as text.
+      }
+      (error as any).response = { status: response.status, data };
       throw error;
     }
 

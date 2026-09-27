@@ -2,7 +2,19 @@ import { Router, Request, Response } from "express";
 import { getProjectByUser, updateProject } from "@dai/db";
 import { requireAuth, getAuthUser } from "../lib/auth.js";
 import { validatePath, MAX_REQUEST_BODY_SIZE, MAX_FILE_READ_SIZE } from "../lib/validation.js";
-import { acquireWorkspace, isRuntimeConfigured, releaseWorkspace, runtimeDefaultPort, runtimeState, terminateRuntime } from "../lib/runtime.js";
+import { absolutePreviewUrl } from "../lib/preview-proxy.js";
+import {
+  acquireWorkspace,
+  coldMirrorProject,
+  isRuntimeConfigured,
+  releaseWorkspace,
+  runtimeBudgetConfig,
+  runtimeDefaultPort,
+  runtimeProvider,
+  runtimeState,
+  terminateRuntime,
+  workspaceMirror,
+} from "../lib/runtime.js";
 import { MAX_ACTIVE_SANDBOXES as MAX_ACTIVE_RUNTIME_PROJECTS } from "../lib/sandbox-queue.js";
 import type { Workspace } from "@dai/modal";
 import type { Project } from "@dai/types";
@@ -23,20 +35,42 @@ function isArchived(lastAccessedAt: string | null): boolean {
 
 function runtimeNotConfigured(res: Response): boolean {
   if (isRuntimeConfigured()) return false;
+  const provider = runtimeProvider();
   res.status(503).json({
-    error: "No execution runtime is configured. Set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET on the backend.",
+    error:
+      provider === "vercel"
+        ? "No execution runtime is configured. Set VERCEL_TOKEN (or VERCEL_OIDC_TOKEN and VERCEL_PROJECT_ID) and the R2_* credentials on the backend."
+        : "No execution runtime is configured. Set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET on the backend.",
     status: "error",
   });
   return true;
 }
 
 /**
+ * Whether a dev server may be started right now, as a user-facing sentence.
+ *
+ * A preview is the only thing in this product that bills while doing nothing:
+ * the VM stays awake and provisioned memory is the ceiling that goes first, so
+ * past the throttle line the convenience is declined rather than deferred.
+ */
+async function previewRefusal(): Promise<string | null> {
+  if (!runtimeBudgetConfig()) return null;
+  try {
+    const { previewRefusalReason } = await import("../lib/cost-governor.js");
+    return await previewRefusalReason();
+  } catch {
+    // A budget that cannot be read is not a reason to refuse a user's request.
+    return null;
+  }
+}
+
+/**
  * Resolve the project and attach it to a live Sandbox.
  *
- * `acquireWorkspace` reattaches to the stored Sandbox while it is still
- * running and otherwise mounts a new one over the same durable Volume, so this
- * never provisions compute per request beyond what the project already needs.
- * The returned handle is released by `close()`, which leaves the Sandbox up.
+ * `acquireWorkspace` reattaches to the stored Sandbox while it is still running
+ * and otherwise resumes it from its snapshot over the same Drive, so this never
+ * provisions compute per request beyond what the project already needs. The
+ * returned handle is released by `close()`, which leaves the Sandbox up.
  */
 async function workspaceForProject(
   projectId: string,
@@ -44,7 +78,7 @@ async function workspaceForProject(
 ): Promise<{ workspace: Workspace; project: Project } | { error: string; status: number } | null> {
   const project = await getProjectByUser(projectId, userId);
   if (!project) return null;
-  if (!project.sandboxId && project.runtimeProvider !== "modal") {
+  if (!project.sandboxId && project.runtimeProvider !== runtimeProvider()) {
     return { status: 409, error: "Project sandbox is not provisioned yet" };
   }
   const { workspace } = await acquireWorkspace(project.id);
@@ -57,6 +91,30 @@ router.get("/:projectId", async (req: Request, res: Response) => {
   try {
     if (runtimeNotConfigured(res)) return;
     const user = getAuthUser(req);
+    const path = (req.query.path as string) || "/workspace";
+    const validation = validatePath(path);
+    if (!validation.valid || !validation.normalized) {
+      res.status(403).json({ error: validation.error || "Invalid path" });
+      return;
+    }
+
+    // Cold-and-mirrored is answered first, and deliberately so: acquiring would
+    // boot a machine to list a directory, and a running machine is billed for
+    // every second it is awake whether or not it is working.
+    const cold = await coldMirrorProject(req.params.projectId!, user.userId);
+    if (cold) {
+      const entries = (await workspaceMirror()?.list(cold.project.id, validation.normalized)) ?? [];
+      res.json(
+        entries.map((entry) => ({
+          name: entry.path.split("/").pop() ?? entry.path,
+          path: entry.path,
+          kind: entry.isDirectory ? "directory" : "file",
+          size: entry.isDirectory ? null : entry.size,
+        }))
+      );
+      return;
+    }
+
     const ctx = await workspaceForProject(req.params.projectId!, user.userId);
     if (!ctx) {
       res.status(404).json({ error: "Project not found" });
@@ -67,12 +125,6 @@ router.get("/:projectId", async (req: Request, res: Response) => {
       return;
     }
     workspace = ctx.workspace;
-    const path = (req.query.path as string) || "/workspace";
-    const validation = validatePath(path);
-    if (!validation.valid || !validation.normalized) {
-      res.status(403).json({ error: validation.error || "Invalid path" });
-      return;
-    }
     res.json(await workspace.listFiles(validation.normalized));
   } catch (error: any) {
     console.error("[workspace:GET]", error.message);
@@ -156,6 +208,29 @@ router.get("/:projectId/file", async (req: Request, res: Response) => {
   try {
     if (runtimeNotConfigured(res)) return;
     const user = getAuthUser(req);
+    const path = (req.query.path as string) || "";
+    const validation = validatePath(path);
+    if (!validation.valid || !validation.normalized) {
+      res.status(403).json({ error: validation.error || "Invalid path" });
+      return;
+    }
+
+    const cold = await coldMirrorProject(req.params.projectId!, user.userId);
+    if (cold) {
+      const bytes = await workspaceMirror()?.readFile(cold.project.id, validation.normalized);
+      if (bytes === null || bytes === undefined) {
+        res.status(404).json({ error: "File not found" });
+        return;
+      }
+      if (bytes.length > MAX_FILE_READ_SIZE) {
+        res.status(413).json({ error: "File exceeds maximum read size" });
+        return;
+      }
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.send(bytes.toString("utf8"));
+      return;
+    }
+
     const ctx = await workspaceForProject(req.params.projectId!, user.userId);
     if (!ctx) {
       res.status(404).json({ error: "Project not found" });
@@ -166,12 +241,6 @@ router.get("/:projectId/file", async (req: Request, res: Response) => {
       return;
     }
     workspace = ctx.workspace;
-    const path = (req.query.path as string) || "";
-    const validation = validatePath(path);
-    if (!validation.valid || !validation.normalized) {
-      res.status(403).json({ error: validation.error || "Invalid path" });
-      return;
-    }
     const content = await workspace.readFile(validation.normalized);
     if (content === null) {
       res.status(404).json({ error: "File not found" });
@@ -207,6 +276,12 @@ router.get("/:projectId/status", async (req: Request, res: Response) => {
     // Modal has no hibernation, so a stopped Sandbox is reported with the
     // existing "hibernated" vocabulary: no live compute, workspace intact.
     const reported = state === "stopped" ? "hibernated" : state;
+    // Modal reclaims an idle Sandbox on its own, and that is the normal end of a
+    // sandbox's life. Recording it here is what stops the row from being counted
+    // against the user's active-sandbox ceiling forever.
+    if (state === "stopped" && !project.isHibernated) {
+      await updateProject(project.id, { isHibernated: true, devServerRunning: false });
+    }
     res.json({
       state: reported,
       sandboxId: project.sandboxId,
@@ -232,6 +307,13 @@ router.post("/:projectId/preview", async (req: Request, res: Response) => {
   let workspace: Workspace | null = null;
   try {
     if (runtimeNotConfigured(res)) return;
+    // Before acquiring: answering "previews are paused" by booting a machine to
+    // say it would be the exact cost this refusal exists to avoid.
+    const declined = await previewRefusal();
+    if (declined) {
+      res.status(429).json({ error: declined });
+      return;
+    }
     const user = getAuthUser(req);
     const ctx = await workspaceForProject(req.params.projectId!, user.userId);
     if (!ctx) {
@@ -263,9 +345,9 @@ router.post("/:projectId/preview", async (req: Request, res: Response) => {
     });
 
     res.json({
-      url: preview.url,
-      // Modal requires this token to reach the tunnel; the proxy endpoint hands
-      // it to the browser so the preview is not a public URL.
+      // The provider's host is stored server-side and never returned: what the
+      // browser gets is the Render proxy behind a short-lived capability.
+      url: absolutePreviewUrl(ctx.project.id, devPort),
       token: preview.token,
       port: devPort,
       reused: server.reused,
@@ -300,11 +382,18 @@ router.post("/:projectId/preview/proxy", async (req: Request, res: Response) => 
     workspace = ctx.workspace;
     const port = ctx.project.previewPort || DEV_PORT;
     let devServerRunning = false;
-    try {
-      const server = await workspace.startDevServer({ command: "npm run dev", port });
-      devServerRunning = server.ready;
-    } catch (error: any) {
-      console.warn(`[workspace:preview-proxy] dev server not started: ${error?.message ?? error}`);
+    // This route runs on page load, so a refusal here is silence rather than an
+    // error: no dev server is started and `devServerRunning` stays false.
+    const declined = await previewRefusal();
+    if (!declined) {
+      try {
+        const server = await workspace.startDevServer({ command: "npm run dev", port });
+        devServerRunning = server.ready;
+      } catch (error: any) {
+        console.warn(`[workspace:preview-proxy] dev server not started: ${error?.message ?? error}`);
+      }
+    } else {
+      console.warn(`[workspace:preview-proxy] ${declined}`);
     }
     const preview = await workspace.getPreviewUrl(port);
     await updateProject(ctx.project.id, {
@@ -314,7 +403,7 @@ router.post("/:projectId/preview/proxy", async (req: Request, res: Response) => 
       lastAccessedAt: new Date().toISOString(),
     });
     res.json({
-      url: preview.url,
+      url: absolutePreviewUrl(ctx.project.id, port),
       token: preview.token,
       isHibernated: false,
       wasHibernated: ctx.project.isHibernated,

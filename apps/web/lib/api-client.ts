@@ -109,7 +109,6 @@ export async function fetchApi(url: string, options?: RequestInit): Promise<Resp
   const response = await fetch(fullUrl, {
     ...options,
     headers,
-    credentials: 'include', // For cookie-based auth
   });
 
     // Handle 401 - clear state and redirect to login (except when already there,
@@ -154,7 +153,6 @@ export async function logout(): Promise<void> {
       await fetch(apiUrl('/api/auth/logout'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
-        credentials: 'include',
       });
     }
     clearAuthState();

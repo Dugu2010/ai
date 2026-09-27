@@ -4,7 +4,7 @@ import { requireAuth, getAuthUser } from "../lib/auth.js";
 import { encrypt, decrypt } from "../lib/crypto.js";
 import { NIM_BASE_URL, NIM_MODEL } from "../lib/env.js";
 import { resolveNimConfig } from "../lib/nim-config.js";
-import { MAX_REQUEST_BODY_SIZE } from "../lib/validation.js";
+import { MAX_REQUEST_BODY_SIZE, validateProviderBaseUrl } from "../lib/validation.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -62,7 +62,14 @@ router.post("/", async (req: Request, res: Response) => {
     } = {};
 
     if (typeof model === "string" && model.trim()) updates.nimModel = model.trim();
-    if (typeof baseUrl === "string" && baseUrl.trim()) updates.nimBaseURL = baseUrl.trim();
+    if (typeof baseUrl === "string" && baseUrl.trim()) {
+      const checked = validateProviderBaseUrl(baseUrl);
+      if (!checked.valid || !checked.normalized) {
+        res.status(400).json({ error: checked.error || "Invalid base URL" });
+        return;
+      }
+      updates.nimBaseURL = checked.normalized;
+    }
     if (typeof apiKey === "string" && apiKey.trim()) {
       updates.nimApiKeyEnc = encrypt(apiKey.trim());
     }
@@ -78,16 +85,9 @@ router.post("/", async (req: Request, res: Response) => {
 /**
  * GET /api/settings/models
  * Proxies the configured provider's OpenAI-compatible /models endpoint so the
- * project UI can show a live model list. Falls back to a static list if the
- * provider is unreachable.
+ * project UI can show a live model list. Reports the provider's own answer, or
+ * an error when it cannot be reached; the UI then falls back to manual entry.
  */
-const FALLBACK_MODELS: { id: string; owned_by?: string }[] = [
-  { id: "meta/llama-3.1-405b-instruct", owned_by: "nvidia" },
-  { id: "meta/llama-3.3-70b-instruct", owned_by: "nvidia" },
-  { id: "deepseek-ai/deepseek-r1", owned_by: "deepseek" },
-  { id: "qwen/qwen2.5-coder-32b-instruct", owned_by: "qwen" },
-];
-
 router.get("/models", async (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
@@ -108,14 +108,14 @@ router.get("/models", async (req: Request, res: Response) => {
         ? data.data
             .map((m: any) => ({ id: String(m?.id ?? ""), owned_by: m?.owned_by }))
             .filter((m: { id: string }) => m.id)
-        : FALLBACK_MODELS;
+        : [];
       res.json({ models, source: "provider" });
     } finally {
       clearTimeout(timer);
     }
   } catch (error: any) {
-    console.warn("[settings:models] falling back to static list:", error.message);
-    res.json({ models: FALLBACK_MODELS, source: "fallback" });
+    console.warn("[settings:models] provider unavailable:", error.message);
+    res.status(502).json({ error: "Provider model list unavailable" });
   }
 });
 

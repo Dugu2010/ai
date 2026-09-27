@@ -43,22 +43,15 @@ export interface Emitter {
   ): ActivityEvent;
 }
 
-/** How the loop reports one activity. `state` advances the visible agent state. */
-export interface Emitter {
-  (
-    type: ActivityEventType,
-    title: string,
-    detail?: ActivityEventDetail,
-    state?: AgentState
-  ): ActivityEvent;
-}
-
 /**
- * Sequences and fans out events. Persists before publishing so a reload
- * reconstructs exactly the timeline the user watched.
+ * Sequences and fans out events.
  *
- * `id` is a placeholder here and is assigned by the store on insert; the browser
- * orders strictly by `seq`, which the emitter owns.
+ * `seq` is assigned here and is the only ordering the browser trusts. Persisting
+ * is handed off rather than awaited, because `emit` is synchronous and is called
+ * from the middle of the loop: an event is therefore guaranteed to reach the
+ * stream, and the store write follows and is logged if it fails.
+ *
+ * `id` is a placeholder here and is assigned by the store on insert.
  */
 export function createActivityEmitter(input: {
   runId: string;

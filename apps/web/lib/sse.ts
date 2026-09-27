@@ -43,9 +43,18 @@ export async function* parseSseStream(stream: ReadableStream<Uint8Array>): Async
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      if (buffer.length > MAX_LINE_BYTES) buffer = buffer.slice(-MAX_LINE_BYTES);
       const lines = buffer.split("\n");
+      // Only the trailing fragment is unparsed; everything complete is kept,
+      // however many frames one read happens to deliver.
       buffer = lines.pop() ?? "";
+      if (buffer.length > MAX_LINE_BYTES) {
+        // A single absurdly long line. Drop that frame and resync rather than
+        // trimming the buffer: the old `slice(-MAX)` discarded whole preceding
+        // frames whenever one read carried more than the cap of complete data.
+        buffer = "";
+        event = "";
+        dataLines = [];
+      }
       for (const rawLine of lines) {
         const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
         if (line === "") {

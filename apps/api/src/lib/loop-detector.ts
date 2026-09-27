@@ -114,7 +114,7 @@ export class LoopDetector {
     ) {
       return this.emit(
         "repeated_failure",
-        "The same failure has now recurred three times, so repeating it will not resolve it.",
+        `The same failure has now recurred ${this.limits.failureThreshold} times, so repeating it will not resolve it.`,
         "Re-read the source of the error and change the fix rather than the retry."
       );
     }

@@ -61,16 +61,22 @@ const READERS: ReadonlySet<string> = new Set(["read_file"]);
 /**
  * Tool definitions given to NIM. Names are unchanged from the previous runtime so
  * the agent's conceptual interface did not move with the provider.
+ *
+ * The cost words here are load-bearing, so they are stated against what the SDK
+ * actually does rather than what each method is called: reading and writing a
+ * file are byte transfers, while listing and searching run `find` inside the
+ * sandbox and are metered like any other command — they are still preferred over
+ * `ls` because they are bounded and cannot be pointed outside the workspace.
  */
 export const TOOLS: ToolDefinition[] = [
-  fn("list_files", "List files and directories under a path in the project workspace", { path: str("Path to list (default /workspace)") }),
-  fn("read_file", "Read a file's contents", { path: str("File path under /workspace") }, ["path"]),
-  fn("search_files", "Find files by name pattern", { pattern: str("Glob pattern"), dir: str("Directory (default /workspace)") }, ["pattern"]),
-  fn("search_content", "Search file contents for a string", { pattern: str("Text to find"), dir: str("Directory (default /workspace)") }, ["pattern"]),
-  fn("write_file", "Create or overwrite a file with complete contents", { path: str("File path"), content: str("Full file content") }, ["path", "content"]),
+  fn("list_files", "List files and directories under a path. METERED (one bounded find), so ask once for the directory you need rather than walking down level by level.", { path: str("Path to list (default /workspace)") }),
+  fn("read_file", "Read a file's contents. Cheap — a direct transfer, not a command. Use it instead of cat or head.", { path: str("File path under /workspace") }, ["path"]),
+  fn("search_files", "Find files by name pattern. METERED (one bounded find): prefer reading the files you already know about.", { pattern: str("Glob pattern"), dir: str("Directory (default /workspace)") }, ["pattern"]),
+  fn("search_content", "Search file contents for a string. METERED (one grep across the tree).", { pattern: str("Text to find"), dir: str("Directory (default /workspace)") }, ["pattern"]),
+  fn("write_file", "Create or overwrite a file with complete contents. Cheap. Prefer edit_file for a small change to an existing file.", { path: str("File path"), content: str("Full file content") }, ["path", "content"]),
   fn(
     "edit_file",
-    "Replace an exact string inside a file. Prefer this over rewriting whole files.",
+    "Replace an exact string inside a file. Preferred over rewriting whole files, and cheap to use.",
     {
       path: str("File path"),
       oldString: str("Exact text to replace; must appear once"),
@@ -78,21 +84,21 @@ export const TOOLS: ToolDefinition[] = [
     },
     ["path", "oldString", "newString"]
   ),
-  fn("delete_file", "Delete a file", { path: str("File path") }, ["path"]),
-  fn("rename_file", "Rename or move a file or directory", { oldPath: str("Current path"), newPath: str("New path") }, ["oldPath", "newPath"]),
+  fn("delete_file", "Delete a file. METERED (runs rm in the sandbox).", { path: str("File path") }, ["path"]),
+  fn("rename_file", "Rename or move a file or directory. METERED (runs mv in the sandbox).", { oldPath: str("Current path"), newPath: str("New path") }, ["oldPath", "newPath"]),
   fn(
     "run_command",
-    "Run a shell command in the project sandbox. Costs runtime: use it when you need to actually execute something.",
+    "Run a shell command. METERED: this spends the project's small monthly compute allowance. Use it only to install, build or test — never to read, list or search files.",
     { command: str("Command to run"), cwd: str("Working directory (default /workspace)"), timeoutMs: num("Timeout in ms") },
     ["command"]
   ),
-  fn("run_tests", "Run the project's test suite and report failures", { filter: str("Optional test name filter") }),
-  fn("start_dev_server", "Start (or reuse) the dev server and return a preview URL", { command: str("Start command"), port: num("Port") }),
-  fn("stop_dev_server", "Stop the dev server", { port: num("Port") }),
-  fn("get_project_status", "Report project runtime state, changed files and budget used"),
+  fn("run_tests", "Run the project's test suite and report failures. METERED: run it once to verify a change that must actually execute, not after every edit.", { filter: str("Optional test name filter") }),
+  fn("start_dev_server", "Start (or reuse) the dev server and return a preview URL. METERED: keeps a machine awake for as long as it runs, so only when the user needs a preview, and it is declined once the month's running time is spent.", { command: str("Start command"), port: num("Port") }),
+  fn("stop_dev_server", "Stop the dev server. METERED: it runs a kill command, and stopping early is what gives the month back.", { port: num("Port") }),
+  fn("get_project_status", "Report project runtime state, changed files and the compute budget used and remaining"),
   fn("get_preview_url", "Get the authenticated preview URL for a running dev server", { port: num("Port") }),
-  fn("git_status", "Show git branch, staged, modified and untracked files"),
-  fn("git_diff", "Show staged and unstaged git changes"),
+  fn("git_status", "Show git branch, staged, modified and untracked files. METERED: git runs against the working tree."),
+  fn("git_diff", "Show staged and unstaged git changes. METERED: git runs against the working tree, so prefer the diff the checkpoint already has."),
 ];
 
 function str(description: string) {
@@ -120,9 +126,11 @@ export function toolByName(name: string): ToolDefinition | undefined {
 /**
  * Read-through cache for the run.
  *
- * Safe to cache because a run holds a Postgres advisory lock on its project, so
- * nothing else mutates the workspace concurrently, and the cache is dropped
- * whenever this run changes a file or executes a command that could have.
+ * Scoped to one run and dropped whenever this run writes a file or runs a command
+ * that could have rewritten one, so it never serves bytes this run invalidated.
+ * It is not protected against a *concurrent* run on the same project: the
+ * acquisition lock in lib/runtime.ts is released as soon as the Sandbox is
+ * attached, so two overlapping runs each hold their own view of these bytes.
  */
 export class RunFileCache {
   private values = new Map<string, string | null>();
@@ -170,6 +178,21 @@ export interface RunDeps {
   ) => void;
   /** Called before a mutating iteration so a checkpoint exists for it. */
   flushCheckpoint: (label: string) => Promise<void>;
+  /**
+   * Monthly compute remaining, phrased for the model rather than the user.
+   * Absent when no budget provider is configured, in which case the status tool
+   * reports nothing rather than inventing a number.
+   */
+  spendReport?: () => Promise<string>;
+  /**
+   * Why a dev server must not be started, or null when it may.
+   *
+   * Absent when no budget provider is configured. A refusal is returned to the
+   * model as the tool result rather than thrown, so the run continues with the
+   * free tools instead of ending on an error the user did not ask for.
+   */
+  previewGate?: () => Promise<string | null>;
+  onCommandTimeout?: () => void;
   previewPort: number;
 }
 
@@ -189,7 +212,7 @@ export interface PendingWrite {
  * multi-file edit costs one command instead of one per file.
  */
 export async function executeReadOnly(
-  deps: Pick<RunDeps, "workspace" | "cache" | "budget" | "previewPort">,
+  deps: Pick<RunDeps, "workspace" | "cache" | "budget" | "previewPort" | "spendReport" | "previewGate">,
   name: string,
   args: Record<string, unknown>
 ): Promise<ToolOutcomeText> {
@@ -267,6 +290,8 @@ export async function executeReadOnly(
       const port = Number(args.port ?? deps.previewPort);
       const command = String(args.command ?? "npm run dev");
       if (!Number.isInteger(port) || port < 1 || port > 65_535) return fail("a valid port is required");
+      const refusal = await deps.previewGate?.();
+      if (refusal) return fail(refusal);
       const server = await workspace.startDevServer({ command, port, cwd: WORKSPACE_ROOT });
       const preview = await workspace.getPreviewUrl(port);
       return {
@@ -290,6 +315,7 @@ export async function executeReadOnly(
           {
             sandboxId: workspace.sandboxId,
             runtime: describeBudget(deps.budget),
+            monthBudget: deps.spendReport ? await deps.spendReport() : undefined,
             iterationsRemaining: deps.budget.iterationsRemaining,
           },
           null,
@@ -306,7 +332,7 @@ export async function executeReadOnly(
 /** Human-readable spend summary, e.g. "2/40 commands, 31s/600s runtime". */
 export function describeBudget(budget: RuntimeBudget): string {
   const spent = budget.summary();
-  return `${spent.activations}/${spent.limits.maxActivationsPerRun} activations, ${spent.execCalls}/${spent.limits.maxExecCallsPerRun} commands, ${Math.round(spent.runtimeMs / 1000)}/${spent.limits.maxRuntimeSecondsPerRun}s runtime`;
+  return `${spent.activations}/${spent.limits.maxActivationsPerRun} activations, ${spent.execCalls}/${spent.limits.maxExecCallsPerRun} metered commands, ${spent.fileOps}/${spent.limits.maxFileOpsPerRun} file operations, ${Math.round(spent.runtimeMs / 1000)}/${spent.limits.maxRuntimeSecondsPerRun}s of running time`;
 }
 
 export function budgetIterationsRemaining(budget: RuntimeBudget): number {

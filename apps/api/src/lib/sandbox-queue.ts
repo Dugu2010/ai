@@ -85,6 +85,16 @@ export async function startSandboxQueueWorker(intervalMs = 15_000): Promise<Node
     } catch (error: any) {
       console.warn(`[sandbox-queue] worker tick failed: ${error?.message ?? error}`);
     }
+    try {
+      // A session left open by a killed process understates the month's spend,
+      // and an understated spend is what lets a budget be blown. Closed here
+      // rather than on a timer of its own so there is one scheduler in the process.
+      const { reconcileOpenSessions } = await import("./cost-governor.js");
+      const reconciled = await reconcileOpenSessions(90);
+      if (reconciled > 0) console.log(`[sandbox-queue] reconciled ${reconciled} unclosed compute session(s)`);
+    } catch (error: any) {
+      console.warn(`[sandbox-queue] usage reconciliation failed: ${error?.message ?? error}`);
+    }
   };
   void tick();
   return setInterval(tick, intervalMs);

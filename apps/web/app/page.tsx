@@ -49,18 +49,6 @@ const CAPABILITIES = [
   },
 ];
 
-/** Sentences the backend really writes, used as the product illustration. */
-const TIMELINE_SAMPLE = [
-  { state: "reading", title: "Reading 8 relevant files", meta: "src/utils.ts · src/utils.test.ts · 8 files" },
-  { state: "editing", title: "Edited 2 files", meta: "src/utils.ts · src/utils.test.ts" },
-  { state: "testing", title: "Tests failed: 2 failures", meta: "vitest run · exit 1 · 4.2s" },
-  { state: "diagnosing", title: "Diagnosing the failure", meta: "exit 1" },
-  { state: "fixing", title: "Edited 1 file", meta: "src/utils.ts" },
-  { state: "testing", title: "Tests passed", meta: "vitest run · 1.2s" },
-  { state: "previewing", title: "Preview ready", meta: "localhost tunnel · port 3000" },
-  { state: "completed", title: "Task complete", meta: "undo available" },
-];
-
 const STEPS = [
   { label: "Ask", body: "Describe the change in plain language. One prompt starts one run." },
   { label: "Watch", body: "Follow the timeline. Errors and retries are shown, not hidden." },
@@ -123,80 +111,35 @@ export default function LandingPage() {
         </section>
 
         <section id="how-it-works" className="max-w-6xl mx-auto px-4 md:px-6 py-12 md:py-20">
-          <div className="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,420px)] gap-8 lg:gap-14 items-start">
-            <div>
-              <h2 className="text-[22px] md:text-[28px]" style={{ fontWeight: 510, letterSpacing: "-0.03em" }}>
-                One run, start to finish
-              </h2>
-              <p className="mt-3 text-[15px] leading-7 max-w-[60ch]" style={{ color: "var(--text-secondary)" }}>
-                The timeline is emitted by the agent loop at real transitions — an acquired workspace, a completed command, a
-                parsed test summary. It is not animated filler, and it never prints the model’s raw tool calls into your chat.
-              </p>
-              <ol className="mt-8 space-y-5">
-                {STEPS.map((step, index) => (
-                  <li key={step.label} className="grid grid-cols-[28px_1fr] gap-3">
-                    <span
-                      aria-hidden="true"
-                      className="mt-0.5 flex items-center justify-center rounded-full font-mono text-[11px]"
-                      style={{ width: 24, height: 24, background: "color-mix(in srgb, var(--accent-primary) 14%, transparent)", color: "var(--accent-primary)" }}
-                    >
-                      {index + 1}
-                    </span>
-                    <div>
-                      <h3 className="text-[14px]" style={{ fontWeight: 590 }}>
-                        {step.label}
-                      </h3>
-                      <p className="text-[13px] leading-6 mt-0.5" style={{ color: "var(--text-muted)" }}>
-                        {step.body}
-                      </p>
-                    </div>
-                  </li>
-                ))}
-              </ol>
-            </div>
-
-            <div
-              className="rounded-lg border overflow-hidden"
-              style={{ borderColor: "var(--border-color)", background: "var(--bg-panel)", boxShadow: "var(--shadow-elevated)" }}
-            >
-              <div className="flex items-center justify-between px-3 h-11 border-b" style={{ borderColor: "var(--border-subtle)" }}>
-                <span className="text-[11px] uppercase tracking-[0.08em]" style={{ color: "var(--text-muted)" }}>
-                  Activity
-                </span>
-                <span
-                  className="badge"
-                  style={{ color: "var(--success)", background: "color-mix(in srgb, var(--success) 10%, transparent)" }}
-                >
-                  Completed
-                </span>
-              </div>
-              <ol>
-                {TIMELINE_SAMPLE.map((row) => (
-                  <li key={row.title} className="flex items-start gap-2.5 px-3 py-2 border-b last:border-b-0" style={{ borderColor: "var(--border-subtle)" }}>
-                    <span
-                      aria-hidden="true"
-                      className="mt-1 shrink-0 rounded-full"
-                      style={{
-                        width: 6,
-                        height: 6,
-                        background: row.state === "testing" && row.title.includes("failed") ? "var(--danger)" : row.state === "completed" ? "var(--success)" : "var(--accent)",
-                      }}
-                    />
-                    <span className="min-w-0">
-                      <span className="block text-[13px] truncate" style={{ color: "var(--text-secondary)" }}>
-                        {row.title}
-                      </span>
-                      <span className="block font-mono text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
-                        {row.meta}
-                      </span>
-                    </span>
-                  </li>
-                ))}
-              </ol>
-              <p className="px-3 py-2 text-[11px]" style={{ color: "var(--text-muted)" }}>
-                Illustrative rows in the product’s own wording.
-              </p>
-            </div>
+          <div className="max-w-[70ch]">
+            <h2 className="text-[22px] md:text-[28px]" style={{ fontWeight: 510, letterSpacing: "-0.03em" }}>
+              One run, start to finish
+            </h2>
+            <p className="mt-3 text-[15px] leading-7 max-w-[60ch]" style={{ color: "var(--text-secondary)" }}>
+              The timeline is emitted by the agent loop at real transitions — an acquired workspace, a completed command, a
+              parsed test summary. It is not animated filler, and it never prints the model’s raw tool calls into your chat.
+            </p>
+            <ol className="mt-8 space-y-5">
+              {STEPS.map((step, index) => (
+                <li key={step.label} className="grid grid-cols-[28px_1fr] gap-3">
+                  <span
+                    aria-hidden="true"
+                    className="mt-0.5 flex items-center justify-center rounded-full font-mono text-[11px]"
+                    style={{ width: 24, height: 24, background: "color-mix(in srgb, var(--accent-primary) 14%, transparent)", color: "var(--accent-primary)" }}
+                  >
+                    {index + 1}
+                  </span>
+                  <div>
+                    <h3 className="text-[14px]" style={{ fontWeight: 590 }}>
+                      {step.label}
+                    </h3>
+                    <p className="text-[13px] leading-6 mt-0.5" style={{ color: "var(--text-muted)" }}>
+                      {step.body}
+                    </p>
+                  </div>
+                </li>
+              ))}
+            </ol>
           </div>
         </section>
 

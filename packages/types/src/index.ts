@@ -39,6 +39,8 @@ export interface Project {
   runtimeProvider: string | null;
   /** Per-project subPath of the shared workspace Volume, mounted at /workspace. */
   runtimeVolumeSubPath: string | null;
+  /** Resource tier the next sandbox for this project boots at. */
+  runtimeResourceTier?: number;
   /**
    * Pre-Modal provider identifier, retained for traceability after the runtime
    * migration. Never used to address a live runtime.

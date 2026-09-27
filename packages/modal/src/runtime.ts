@@ -697,8 +697,11 @@ export class ModalRuntimeService implements RuntimeService {
       tags: { "dai.project": targetProjectId, "dai.purpose": "duplicate" },
     });
     try {
-      const source = volumeSubPath(sourceProjectId);
-      const target = volumeSubPath(targetProjectId);
+      // Absolute against the maintenance mount: these Sandboxes get no `workdir`,
+      // so a bare `projects/<id>` would resolve against the image's own directory
+      // and the copy would silently operate on nothing.
+      const source = `${VOLUME_ROOT}/${volumeSubPath(sourceProjectId)}`;
+      const target = `${VOLUME_ROOT}/${volumeSubPath(targetProjectId)}`;
       const result = await sandbox.exec(
         ["/bin/bash", "-c", 'mkdir -p "$2" && cp -a "$1"/. "$2"/', "copy", source, target],
         { timeoutMs: 9 * 60_000 }
@@ -831,7 +834,10 @@ export class ModalRuntimeService implements RuntimeService {
       tags: { "dai.project": projectId, "dai.purpose": "measure" },
     });
     try {
-      const target = volumeSubPath(projectId);
+      // Same absolute-against-the-mount rule as purgeWorkspace: `du` on a bare
+      // subPath finds nothing and its error is discarded, which reads as a
+      // measurement of zero rather than a failure to measure.
+      const target = `${VOLUME_ROOT}/${volumeSubPath(projectId)}`;
       const proc = await sandbox.exec(
         ["/bin/bash", "-c", 'du -sb -- "$1" 2>/dev/null | cut -f1', "measure", target],
         { timeoutMs: 60_000 }

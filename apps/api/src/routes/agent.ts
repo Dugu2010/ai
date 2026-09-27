@@ -1,13 +1,16 @@
 import { Router, Request, Response } from "express";
 import {
   getProjectByUser,
+  updateProject,
   getActiveConversation,
+  getConversationForProject,
   createConversation,
   listMessages,
   addMessage,
 } from "@dai/db";
 import { createAgentRun, getAgentRun, insertActivityEvent, updateAgentRun } from "@dai/db";
 import { NIMClient, type ChatMessage } from "@dai/nim";
+import type { ActivityEventType, AgentState } from "@dai/types";
 import { requireAuth, getAuthUser } from "../lib/auth.js";
 import { resolveNimConfig } from "../lib/nim-config.js";
 import {
@@ -16,9 +19,12 @@ import {
   isRuntimeConfigured,
   recordWorkspaceUsage,
   releaseWorkspace,
+  runtimeBudgetConfig,
   runtimeDefaultPort,
+  runtimeProvider,
 } from "../lib/runtime.js";
 import { DEFAULT_BUDGET_LIMITS, RuntimeBudget } from "../lib/runtime-policy.js";
+import { configFromEnv as vercelConfigFromEnv } from "@dai/vercel";
 import { LoopDetector } from "../lib/loop-detector.js";
 import { createActivityEmitter, type ActivityEvent } from "../lib/activity.js";
 import { runAgentLoop } from "../lib/agent-loop.js";
@@ -27,16 +33,38 @@ import { isCancelled, registerCancellation, unregisterCancellation } from "../li
 const router = Router();
 router.use(requireAuth);
 
+/**
+ * The economics are part of the instructions.
+ *
+ * Reading, searching and editing files costs nothing on this runtime; running a
+ * command does, against a small fixed monthly allowance that suspends the
+ * product when it runs out. A model told only what it may do will use a shell to
+ * `cat` a file it could have read, so the prompt says which door is free.
+ */
 const SYSTEM_PROMPT = [
   "You are DAI, an expert coding agent working inside a project sandbox.",
   "Project files live under /workspace. Use the provided tools to inspect, create, edit, and run code.",
   "Prefer edit_file for small changes and write_file for new files.",
-  "Run tests or a build to verify a change before claiming it works.",
+  "Reading a file and writing a file are cheap. Everything else — listing a directory, searching by",
+  "name or content, git, and running a command — executes inside the sandbox and is metered against a",
+  "small monthly compute allowance that cannot be topped up. So read the files you already know about",
+  "instead of listing to find them, and run a command only when a change must actually be executed:",
+  "installing, building, or testing. Never use a command to inspect something a file tool can answer,",
+  "and do not start the dev server to look at a result you can read.",
+  "When a real check is warranted, run the project's tests or build once and report what actually happened.",
   "Never describe reasoning you did not perform, and never claim a command passed without running it.",
 ].join(" ");
 
 function writeSSE(res: Response, event: string, data: Record<string, unknown>): void {
-  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  // The client owns a long-lived stream and may vanish at any moment; writing to
+  // a dead socket emits an error on the response rather than throwing, so an
+  // unhandled one could take the process down mid-run.
+  if (res.writableEnded || !res.writable) return;
+  try {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  } catch {
+    // Connection is gone; the run itself is stopped via the close listener.
+  }
 }
 
 /**
@@ -70,9 +98,40 @@ function frameForLegacyStream(event: ActivityEvent): Array<[string, Record<strin
   }
 }
 
+/**
+ * Remember that this project needs a bigger machine next time.
+ *
+ * Nothing here changes the run in flight — a live sandbox cannot be resized, and
+ * re-acquiring mid-run would lose the workspace it is working in. The tier is
+ * persisted so the *next* acquisition starts at the size this one proved it
+ * needed, which is what stops a project re-discovering the same timeout daily.
+ * Governor rules (weekly cap, throttle levels, top tier) live in cost-governor.
+ */
+async function escalateTier(project: { id: string; runtimeResourceTier?: number }): Promise<void> {
+  try {
+    const config = runtimeBudgetConfig();
+    if (!config) return;
+    const { nextTierAfterTimeout, readHeadroom } = await import("../lib/cost-governor.js");
+    const headroom = await readHeadroom(config.budget);
+    const current = project.runtimeResourceTier ?? 0;
+    const next = await nextTierAfterTimeout(project.id, current, vercelConfigFromEnv(), headroom.level);
+    if (next === current) return;
+    await updateProject(project.id, { runtimeResourceTier: next });
+  } catch (error) {
+    // Sizing is an optimisation; never let it fail a run that already finished.
+    console.warn("[agent] escalation check failed:", error instanceof Error ? error.message : error);
+  }
+}
+
 router.post("/:id/agent", async (req: Request, res: Response) => {
   let workspace: Awaited<ReturnType<typeof acquireWorkspace>>["workspace"] | null = null;
   let runId: string | null = null;
+
+  // A browser that goes away mid-run must not leave the loop spending activations
+  // and holding a Sandbox with nobody watching it.
+  const onClientGone = () => {
+    if (runId) registerCancellation(runId);
+  };
 
   try {
     const user = getAuthUser(req);
@@ -99,8 +158,19 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
     const nimConfig = await resolveNimConfig(user.userId);
     const nim = new NIMClient(nimConfig.apiKey, nimConfig.baseURL, nimConfig.model);
 
-    let convId: string = conversationId;
-    if (!convId) {
+    // A caller chooses which conversation to continue, so it has to be verified
+    // against this project: the history below is loaded from it and the run's
+    // messages are written to it.
+    let convId: string;
+    if (typeof conversationId === "string" && conversationId) {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(conversationId);
+      const owned = isUuid && (await getConversationForProject(conversationId, project.id));
+      if (!owned) {
+        res.status(400).json({ error: "conversationId does not belong to this project" });
+        return;
+      }
+      convId = owned.id;
+    } else {
       const existing = await getActiveConversation(project.id);
       convId = existing
         ? existing.id
@@ -156,14 +226,22 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
+    res.on("close", onClientGone);
 
+    // `emit` is synchronous, so the inserts it starts are tracked here and drained
+    // before the stream closes: the client reads `/status` the moment it does, and
+    // an event still in flight would make that authoritative read come back
+    // with the tail of the timeline missing.
+    const pendingActivity: Promise<void>[] = [];
     const emitter = createActivityEmitter({
       runId: run.id,
       projectId: project.id,
       persist: (event) => {
-        void insertActivityEvent(run.id, project.id, event).catch((error: unknown) => {
-          console.error("[agent] activity persist failed:", error instanceof Error ? error.message : error);
-        });
+        pendingActivity.push(
+          insertActivityEvent(run.id, project.id, event).catch((error: unknown) => {
+            console.error("[agent] activity persist failed:", error instanceof Error ? error.message : error);
+          })
+        );
       },
       publish: (frame) => {
         writeSSE(res, "activity", frame as unknown as Record<string, unknown>);
@@ -197,9 +275,17 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       { role: "user", content: message },
     ];
 
-    registerCancellation(run.id);
+    // Set when a command exhausts its deadline: the one signal that a bigger
+    // machine might actually help rather than just fail the same way faster.
+    let commandTimedOut = false;
+    // The flag in lib/cancellations.ts means "the user asked this run to stop",
+    // and only the stop route sets it. Registering a fresh run here would mark it
+    // cancelled before the loop's first check and end every run immediately.
     const result = await runAgentLoop({
       projectId: project.id,
+      onCommandTimeout: () => {
+        commandTimedOut = true;
+      },
       runId: run.id,
       prompt: message,
       workspace,
@@ -209,6 +295,28 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       budget,
       loop,
       previewPort: runtimeDefaultPort(),
+      // Lets `get_project_status` answer with the month's remaining compute, so
+      // the model can choose to finish with file tools instead of spending.
+      spendReport: async () => {
+        try {
+          const { describeHeadroom, readHeadroom } = await import("../lib/cost-governor.js");
+          const config = runtimeBudgetConfig();
+          return config ? describeHeadroom(await readHeadroom(config.budget), config.budget) : "";
+        } catch {
+          return "";
+        }
+      },
+      // Checked per call rather than once at acquire: a run can be long, and the
+      // month's state is what decides, not the state when it started.
+      previewGate: async () => {
+        try {
+          if (!runtimeBudgetConfig()) return null;
+          const { previewRefusalReason } = await import("../lib/cost-governor.js");
+          return await previewRefusalReason();
+        } catch {
+          return null;
+        }
+      },
       aborted: () => isCancelled(run.id),
       onAssistantText: (text) => writeSSE(res, "assistant_delta", { text }),
       recordToolCall: async (entry) => {
@@ -265,6 +373,14 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       result.state
     );
 
+    // A timeout is the only evidence the sizing rule acts on, so persist the
+    // verdict before the stream closes and the next run chooses its machine.
+    if (commandTimedOut) await escalateTier(project);
+
+    // Every event the user watched has to be readable from `/status` by the time
+    // this stream closes, so drain the detached writes first.
+    await Promise.all(pendingActivity);
+
     writeSSE(res, "done", {
       runId: run.id,
       conversationId: convId,
@@ -291,6 +407,7 @@ router.post("/:id/agent", async (req: Request, res: Response) => {
       // The response is already broken.
     }
   } finally {
+    res.removeListener("close", onClientGone);
     if (workspace) releaseWorkspace(workspace);
     if (runId) unregisterCancellation(runId);
   }
@@ -320,6 +437,13 @@ router.post("/:id/agent/stop", async (req: Request, res: Response) => {
       res.status(404).json({ error: "Run not found for this project" });
       return;
     }
+    // Nobody is left to observe the flag once the loop has exited, and only the
+    // owning request clears it — stopping a finished run would leak the id for
+    // the lifetime of the process.
+    if (run.finishedAt) {
+      res.status(409).json({ error: "That run has already finished.", code: "already_finished" });
+      return;
+    }
     // Only the request is recorded here. Writing `cancelled` now would claim a
     // result the loop has not produced yet, and would lose to the loop's own
     // final write whenever the last step finished first.
@@ -339,17 +463,61 @@ router.get("/:id/agent/status", async (req: Request, res: Response) => {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    const { listAgentRuns, listActivityEvents, findLatestAppliedCheckpoint, findNextUndoneCheckpoint } = await import("@dai/db");
+    const {
+      listAgentRuns,
+      listActivityEvents,
+      hasCheckpointWithStatus,
+    } = await import("@dai/db");
     const runs = await listAgentRuns(project.id, 1);
     const run = runs[0] ?? null;
-    const events = run ? await listActivityEvents(run.id) : [];
+    // Columns are flat and snake_case; the browser's `AgentRun`/`ActivityEvent`
+    // types want nested `counts` and a camelCase `type`. Handing out raw rows
+    // made every finished run render a zeroed budget meter and a timeline whose
+    // events had no kind, because this read replaces the streamed ones.
+    const wireRun = run && {
+      id: run.id,
+      projectId: run.projectId,
+      conversationId: run.conversationId,
+      prompt: run.prompt,
+      state: run.state,
+      outcome: run.outcome,
+      stopReason: run.stopReason,
+      counts: {
+        iterations: run.iterations,
+        toolCalls: run.toolCalls,
+        execCalls: run.execCalls,
+        runtimeActivations: run.runtimeActivations,
+        runtimeMs: run.runtimeMs,
+        filesChanged: run.filesChanged,
+      },
+      sandboxId: run.sandboxId,
+      summary: run.summary,
+      lastError: run.lastError,
+      createdAt: run.createdAt,
+      finishedAt: run.finishedAt,
+    };
+    const rows = run ? await listActivityEvents(run.id) : [];
+    const events = rows.map((row) => ({
+      id: 0,
+      runId: run!.id,
+      seq: row.seq,
+      type: row.event_type as ActivityEventType,
+      state: row.state as AgentState | null,
+      title: row.title,
+      detail: row.detail ?? {},
+      createdAt: row.created_at,
+    }));
     const limits = DEFAULT_BUDGET_LIMITS;
+    const [canUndo, canRedo] = await Promise.all([
+      hasCheckpointWithStatus(project.id, "applied"),
+      hasCheckpointWithStatus(project.id, "undone"),
+    ]);
     res.json({
-      run,
+      run: wireRun,
       events,
       limits,
-      canUndo: Boolean(await findLatestAppliedCheckpoint(project.id)),
-      canRedo: Boolean(await findNextUndoneCheckpoint(project.id)),
+      canUndo,
+      canRedo,
       canContinue: run?.outcome === "paused" || run?.outcome === "budget_exhausted",
       canRetryDifferently: run?.outcome === "paused",
     });

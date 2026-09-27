@@ -44,8 +44,18 @@ services:
       # Add these manually in the Render dashboard as secret env vars:
       #   MODAL_TOKEN_ID / MODAL_TOKEN_SECRET — execution runtime (Modal)
       #   NIM_API_KEY                         — NVIDIA NIM LLM access
+      # Optional non-secret overrides for the Vercel path: VERCEL_CACHE_DRIVE,
+      # VERCEL_CACHE_PATH, VERCEL_SANDBOX_MAX_VCPUS, PUBLIC_API_URL (the API's own
+      # origin, needed for absolute proxied preview URLs).
+      #
       # Optional non-secret overrides: MODAL_CPU, MODAL_MEMORY_MIB,
       # MODAL_IDLE_TIMEOUT_MS, MODAL_VOLUME_NAME, MODAL_PREVIEW_PORTS.
+      #
+      # To move execution onto Vercel Sandbox + Drives with an R2 mirror, add
+      # VERCEL_TOKEN and the R2_* values as secrets and set RUNTIME_PROVIDER to
+      # vercel -- but only after `bun run tsx scripts/migrate-runtime-v2.ts`
+      # has copied every workspace out of the Modal Volume. See
+      # VERCEL_RUNTIME_MIGRATION.md for the order of operations.
       #
       # The Modal image is built once out-of-band (never during a request):
       #   bun run tsx scripts/build-runtime-image.ts

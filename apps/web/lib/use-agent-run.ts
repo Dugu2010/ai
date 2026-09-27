@@ -367,6 +367,12 @@ export function useAgentRun(options: UseAgentRunOptions): AgentRunController {
       setRestore(null);
       setStreaming(true);
       setEvents([]);
+      // Ownership of `run` moves to the new task immediately. The first frame
+      // carrying the new run id only arrives once the Sandbox is attached, which
+      // can take seconds, and until then Stop and the status pill would have been
+      // acting on the previous run.
+      setRun(null);
+      setFlags(EMPTY_FLAGS);
       streamMessageRef.current = null;
       lastUserPromptRef.current = trimmed;
 

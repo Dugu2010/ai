@@ -45,22 +45,25 @@ async function withWorkspace<T>(
 }
 
 /**
- * Append the restore to the latest run's timeline so the activity feed stays
- * truthful: an undo really happened, and reloading the page must show it.
+ * Append the restore to the timeline of the run the checkpoint actually came
+ * from, so the activity feed stays truthful: an undo really happened, and
+ * reloading the page must show it.
  */
 async function recordRestore(projectId: string, outcome: RestoreOutcome): Promise<void> {
-  const runs = await listAgentRuns(projectId, 1);
-  const run = runs[0];
-  if (!run) return;
+  // The newest run is only a fallback: undoing an old checkpoint must not write
+  // the event onto a later, unrelated run's timeline.
+  const runId = outcome.runId ?? (await listAgentRuns(projectId, 1))[0]?.id;
+  if (!runId) return;
   // Continue the run's own sequence: UNIQUE(run_id, seq) plus ON CONFLICT DO
   // NOTHING meant an undo restarting at 1 was discarded instead of appended.
-  const startSeq = await maxActivitySeq(run.id);
+  const startSeq = await maxActivitySeq(runId);
+  const persisted: Promise<void>[] = [];
   const emitter = createActivityEmitter({
-    runId: run.id,
+    runId,
     projectId,
     startSeq,
     persist: (event) => {
-      void insertActivityEvent(run.id, projectId, event).catch(() => undefined);
+      persisted.push(insertActivityEvent(runId, projectId, event).catch(() => undefined));
     },
     publish: () => undefined,
   });
@@ -76,6 +79,9 @@ async function recordRestore(projectId: string, outcome: RestoreOutcome): Promis
       status: outcome.status,
     }
   );
+  // The caller reloads the timeline as soon as this responds, so the row has to
+  // be in Postgres before the response goes out.
+  await Promise.all(persisted);
 }
 
 function respond(res: Response, outcome: RestoreOutcome): void {

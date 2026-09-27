@@ -28,7 +28,8 @@ import { classifyCommand, errorSignature, parseFailureCount } from "./activity.j
 import { validatePath } from "./validation.js";
 import type { LoopDetector } from "./loop-detector.js";
 import { callKey } from "./loop-detector.js";
-import type { RuntimeBudget } from "./runtime-policy.js";
+import type { GateResult, RuntimeBudget } from "./runtime-policy.js";
+import { needsRuntime, type RuntimeOperation } from "./runtime-policy.js";
 import {
   executeReadOnly,
   isMutatingTool,
@@ -69,6 +70,17 @@ export interface AgentLoopInput {
   }) => Promise<void>;
   /** Checked between iterations so Stop ends the run cleanly, not mid-command. */
   aborted?: () => boolean;
+  /** Monthly compute remaining, so a throttled model can be told to stop spending. */
+  spendReport?: () => Promise<string>;
+  /** Why a dev server may not start right now; see RunDeps.previewGate. */
+  previewGate?: () => Promise<string | null>;
+  /**
+   * Called when a command exhausted the time it was given.
+   *
+   * This is the only signal that a bigger machine could help; a non-zero exit is
+   * a failing test, and a bigger machine would just fail it faster.
+   */
+  onCommandTimeout?: () => void;
   /**
    * Called with each piece of assistant prose as it arrives. Without this only
    * the last turn's text would reach the chat, so a model that narrates "I will
@@ -92,6 +104,43 @@ export interface AgentLoopResult {
   runtimeMs: number;
 }
 
+/**
+ * Which budget each tool draws from.
+ *
+ * Derived from the policy table rather than a hand-maintained list of "expensive
+ * tools", so a command and a file read cannot silently end up in the same
+ * bucket again. Exported for the test that checks the tool descriptions the
+ * model reads still agree with it. A tool missing here is treated as a command:
+ * the conservative direction is to charge the *scarcer* thing.
+ */
+export const TOOL_OPERATIONS: Record<string, RuntimeOperation> = {
+  run_command: "command.exec",
+  run_tests: "command.exec",
+  start_dev_server: "dev_server.start",
+  stop_dev_server: "command.exec",
+  git_status: "git.status",
+  git_diff: "git.diff",
+  search_content: "fs.search_content",
+  read_file: "fs.read",
+  list_files: "fs.list",
+  search_files: "fs.search_name",
+  get_preview_url: "preview.url",
+  get_project_status: "preview.url",
+  write_file: "fs.write",
+  edit_file: "fs.write",
+  create_file: "fs.write",
+  delete_file: "fs.delete",
+  rename_file: "fs.rename",
+};
+
+function chargeTool(budget: RuntimeBudget, toolName: string): { gate: GateResult; metered: boolean } {
+  const operation = TOOL_OPERATIONS[toolName] ?? "command.exec";
+  const { activeCpuCost } = needsRuntime(operation);
+  return activeCpuCost
+    ? { gate: budget.startExec(), metered: true }
+    : { gate: budget.startFileOperation(), metered: false };
+}
+
 export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResult> {
   const { workspace, nim, messages, emit, budget, loop, projectId, runId } = input;
 
@@ -108,6 +157,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     flushCheckpoint: async (label) => {
       await commitCheckpoint(label);
     },
+    ...(input.spendReport ? { spendReport: input.spendReport } : {}),
+    ...(input.previewGate ? { previewGate: input.previewGate } : {}),
+    ...(input.onCommandTimeout ? { onCommandTimeout: input.onCommandTimeout } : {}),
     previewPort: input.previewPort,
   };
 
@@ -138,6 +190,10 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       break;
     }
     if (!budget.useIteration()) break;
+
+    // The Sandbox is attached and billing for the whole of an iteration, the
+    // model round trip included, so this is what `runtimeMs` measures.
+    const iterationStartedAt = Date.now();
 
     // "thinking" brackets a real await on the model, not a decorative pause.
     emit("agent.status", "Deciding what to do next", { iteration: budget.iterations }, "thinking");
@@ -227,6 +283,10 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       loop.record({ ...observation, filesChanged: changedThisTurn, changedBytes });
     }
 
+    // Charge the iteration's wall clock before the ceiling is assessed, so the
+    // run that trips it is the run that spent the time.
+    budget.recordRuntimeMs(Date.now() - iterationStartedAt);
+
     const verdict = loop.assess();
     if (verdict.looping) {
       emit("agent.loop.detected", verdict.summary, { kind: verdict.kind ?? undefined, recoveries: loop.recoveries }, "diagnosing");
@@ -269,9 +329,14 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
      * ---- per-turn helpers -------------------------------------------------
      */
     async function runNonMutating(call: ToolCall, args: Record<string, unknown>): Promise<ToolOutcomeText> {
-      const gate = budget.startExec();
+      const { gate, metered } = chargeTool(budget, call.name);
       if (!gate.ok) {
-        emit("agent.error", "Operation skipped: runtime budget exhausted", { reason: gate.message }, "waiting");
+        emit(
+          "agent.error",
+          metered ? "Command skipped: compute budget exhausted" : "Operation skipped: file-operation limit reached",
+          { reason: gate.message },
+          "waiting"
+        );
         return { result: `Error: ${gate.message}`, success: false };
       }
 
@@ -357,6 +422,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         executed.success ? "verifying" : "diagnosing"
       );
 
+      if (summary.timedOut) deps.onCommandTimeout?.();
       if (!executed.success) {
         emit("agent.status", "Diagnosing the failure", { exitCode: summary.exitCode }, "diagnosing");
       }
@@ -392,15 +458,20 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         // to write any path whose current bytes it does not already own.
         edits.push({ path: target, content: current, expectCurrent: null });
         edits.push({ path: source, content: null, expectCurrent: current });
+        // Two paths moved, so nothing cached about this project is trustworthy.
+        cache.invalidateAll();
       } else {
         const current = await cachedRead(target);
         const desired = resolveDesiredContent(call.name, { ...args, path: target }, current);
         if (!desired.ok) return { result: `Error: ${desired.error}`, success: false };
         collector.plan({ path: target, kind: desired.kind, newContent: desired.content });
         edits.push({ path: target, content: desired.content, expectCurrent: current });
+        // Chain the next edit planned against this path. Nothing is on disk yet,
+        // so re-reading (or invalidating) would hand a second same-turn edit the
+        // pre-edit bytes: its change would be dropped while still being reported
+        // as queued, and the checkpoint's post-image would disagree with the file.
+        cache.store(target, desired.content);
       }
-
-      cache.invalidateAll();
       pendingLabel ??= describeChanges([{ path: target }]);
       return { result: describePlanned(call.name, target), success: true };
     }
@@ -408,9 +479,12 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     async function applyEdits(
       requested: PlannedEdit[]
     ): Promise<{ changed: number; bytes: number; paths: string[] }> {
-      const gate = budget.startExec();
+      // An edit is a file API write plus a mirror put: it holds the machine
+      // awake but spends no command CPU, so it is charged against the
+      // file-operation ceiling rather than the command budget.
+      const gate = budget.startFileOperation();
       if (!gate.ok) {
-        emit("agent.error", "Edits were not applied: runtime budget exhausted", { reason: gate.message }, "waiting");
+        emit("agent.error", "Edits were not applied: file-operation limit reached", { reason: gate.message }, "waiting");
         return { changed: 0, bytes: 0, paths: [] };
       }
 
@@ -453,7 +527,10 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     async function cachedRead(path: string): Promise<string | null> {
       const peeked = cache.peek(path);
       if (peeked.hit) return peeked.content;
-      const gate = budget.startExec();
+      // The cache still matters on this provider: a repeat read is free of
+      // command CPU but costs a control-plane transfer, and every second of it
+      // is a machine that stays awake.
+      const gate = budget.startFileOperation();
       if (!gate.ok) return null;
       const content = await workspace.readFile(path);
       cache.store(path, content);

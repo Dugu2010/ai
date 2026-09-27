@@ -32,8 +32,9 @@ bun run typecheck
 
 ### Tests
 ```bash
-bun run test              # packages/modal (87) + apps/api (245) + apps/web (40); no credentials needed
+bun run test              # modal (92) + vercel (67) + api (309) + web (47); no credentials needed
 bun run test:modal
+bun run test:vercel
 bun run test:api
 bun run test:web
 
@@ -50,44 +51,78 @@ export inline-compatible shape, and `lib/api-client.ts` uses a full-page
 ## Fixed Architecture — do not migrate it
 
 ```
-Vercel (apps/web)  →  Render (apps/api + PostgreSQL)  →  Modal (Sandbox + Volume)
-                                                  ↘  NVIDIA NIM (model)
+Vercel (apps/web)  →  Render (apps/api + PostgreSQL)  →  provider runtime
+                             │                    (Vercel Sandbox + Drives, or Modal)
+                             └─ Cloudflare R2 (workspace mirror)
+                                                        ↘  NVIDIA NIM (model)
 ```
 
-This is the whole system. There is no other runtime, no container
-orchestration, and no self-hosted compute tier. Do not introduce Kubernetes,
-k3s, kind, Docker-in-the-backend, systemd units or any other execution
-infrastructure, and do not treat host capabilities (Docker, sudo, cgroups) as
-an invitation to change the deployment target. Adding a provider means
-implementing the `Workspace`/`RuntimeService` contract in a new
-`packages/*` module — and only when asked.
+This is the whole system. There is no container orchestration and no
+self-hosted compute tier. Do not introduce Kubernetes, k3s, kind,
+Docker-in-the-backend, systemd units or any other execution infrastructure, and
+do not treat host capabilities (Docker, sudo, cgroups) as an invitation to
+change the deployment target. The **API and PostgreSQL stay on Render** by
+decision: the agent loop holds one long-lived request, the sandbox queue runs on
+an interval, and cancellation and rate limiting are in-process — all of which
+need a persistent process, which Vercel Functions' 300-second ceiling does not.
 
-## Execution Runtime: Modal
+Adding a provider still means implementing the `Workspace`/`RuntimeService`
+contract in a new `packages/*` module — never branching on provider inside
+`apps/api` except through `runtimeProvider()`.
 
-DAI runs agent code inside **Modal Sandboxes** with a persistent **Modal Volume**
-workspace. Formerly Freestyle, then CodeSandbox; both are fully removed.
+## Execution Runtime: Vercel Sandbox (Modal is the legacy provider)
 
-Architecture: Vercel frontend → Render API (`apps/api`) → Modal (Sandbox +
-Volume); NVIDIA NIM is the model. Read
-`RUNTIME_ARCHITECTURE.md` and `MODAL_RUNTIME_MIGRATION.md` before touching the
-runtime.
+DAI runs agent code in **Vercel Sandboxes**, with one **Vercel Drive** mounted at
+`/workspace` per project as the live tree and **Cloudflare R2** as the durable
+mirror. `RUNTIME_PROVIDER` selects the provider and defaults to `vercel`;
+`modal` is the legacy value, kept only for instances still holding workspaces in
+the Modal Volume (see `VERCEL_RUNTIME_MIGRATION.md`). Formerly Freestyle, then
+CodeSandbox; both fully removed.
+
+Read `RUNTIME_ARCHITECTURE.md` and `VERCEL_RUNTIME_MIGRATION.md` before touching
+the runtime.
 
 Key rules for edits here:
 
-- `packages/modal` is the only place that imports the `modal` SDK. Routes use the
-  `Workspace` / `RuntimeService` contract via `apps/api/src/lib/runtime.ts`.
-- Verify SDK calls against `node_modules/modal/dist/index.d.ts`. The package is
-  **0.x beta**, and the `.d.ts` is a single bundled file — grep it rather than
-  trusting recalled or blogged APIs.
-- Never resume a finished Sandbox; Modal cannot. Reattach to a live one via
-  `sandboxes.fromId()` + `poll() === null`, else create a new Sandbox over the
-  same Volume subPath. Postgres is the authoritative project→Sandbox mapping.
-- Durable state lives in the Volume at `projects/<projectId>`, mounted at
-  `/workspace`. Losing compute must never lose files.
-- No keepalive or per-command provisioning: `idleTimeoutMs` reclaims compute,
-  and open TCP connections count as Sandbox activity.
-- Modal secrets (`MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`) belong to Render only.
-  The frontend may read just `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_DAI_MODEL`.
+- Each SDK is imported by exactly one package: `@vercel/sandbox` and the S3
+  client by `packages/vercel`, `modal` by `packages/modal`. Routes use the
+  `Workspace`/`RuntimeService` contract from `@dai/runtime` via
+  `apps/api/src/lib/runtime.ts`.
+- Verify SDK calls against the installed `dist/*.d.ts`, not documentation prose or
+  memory. Both providers ship ESM and CJS builds, so classification of provider
+  errors is structural (`response.status`) because `instanceof` can fail across
+  that boundary.
+- **Never boot a machine to look at files.** Reading or listing a cold project's
+  tree is served from the R2 mirror; `coldMirrorProject()` gates it. Every Vercel
+  file API resumes the sandbox, and `fs.readdir`/`stat`/`rename`/`rm` are
+  implemented as *commands* inside the SDK, so they cost metered CPU.
+- Installing dependencies is the largest Active-CPU cost. `VERCEL_CACHE_DRIVE`
+  names a shared drive mounted read-only at `/dai-cache` with package-manager
+  cache env vars set on every sandbox; populate it with
+  `VercelRuntimeService.acquireCacheWriter()` (only one sandbox may hold a drive
+  read-write). A snapshot of a never-written cache drive is refused by the
+  platform, and the provider degrades to no-cache rather than failing the boot.
+- Only `runCommand` spends Active CPU. Provisioned memory is billed as wall clock
+  of a running VM including idle, so an un-stopped sandbox is the faster way to
+  exhaust the month.
+- The monthly budget is enforced **before** acquiring, at 95% of the Hobby
+  allotment, because exceeding it pauses sandbox creation for 30 days rather than
+  producing a bill. See `apps/api/src/lib/cost-governor.ts`.
+- Sandboxes are persistent and resumable by name (`dai-<projectId>`); the
+  Modal-era rule "never resume a finished sandbox" does not carry over. Postgres
+  remains the authoritative project→sandbox mapping.
+- Losing compute must never lose files: the mirror is written through on every
+  mutation and a project is marked dirty whenever a command could have written
+  files the mirror never saw.
+- Provider secrets (`VERCEL_TOKEN`, `MODAL_TOKEN_ID`/`SECRET`, `R2_*` keys,
+  `NIM_API_KEY`) belong to Render only. The frontend may read just
+  `NEXT_PUBLIC_API_URL`.
+- Vercel preview URLs carry no token. The browser is never given
+  `sandbox.domain(port)`: `apps/api/src/routes/preview.ts` proxies it and the
+  credential is a short-lived HMAC capability in the path, because an iframe
+  cannot send an Authorization header. The proxy router is mounted **before**
+  `requireAuth` on purpose — the token is the credential there, so do not add
+  anything to that file that trusts the path alone.
 - `apps/api` resolves workspace packages from their built `dist/`, so after
   editing `packages/*` run `bun run build:packages` before typechecking the API.
 

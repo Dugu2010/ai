@@ -1,9 +1,12 @@
 {
+  "extends": "./tsconfig.base.json",
   "files": [],
   "references": [
     { "path": "packages/types" },
     { "path": "packages/db" },
+    { "path": "packages/runtime" },
     { "path": "packages/modal" },
+    { "path": "packages/vercel" },
     { "path": "packages/nim" },
     { "path": "apps/web" }
   ]

@@ -7,6 +7,7 @@ import projectRoutes from "./routes/projects.js";
 import agentRoutes from "./routes/agent.js";
 import settingsRoutes from "./routes/settings.js";
 import conversationRoutes from "./routes/conversations.js";
+import previewRoutes from "./routes/preview.js";
 import workspaceRoutes from "./routes/workspace.js";
 import rollbackRoutes from "./routes/rollback.js";
 
@@ -23,7 +24,14 @@ const corsOptions = {
   origin(origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) {
     // Allow server-to-server / curl (no Origin header)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.length === 0) return callback(null, true); // open during setup; set ALLOWED_ORIGINS in prod
+    if (allowedOrigins.length === 0) {
+      // Reflecting an arbitrary origin alongside `credentials: true` is a
+      // session-theft primitive as soon as any cookie credential exists, so the
+      // "open during setup" default is confined to non-production. Render sets
+      // ALLOWED_ORIGINS in render.yaml; a production with none fails closed.
+      if (process.env.NODE_ENV === "production") return callback(new Error("Not allowed by CORS"));
+      return callback(null, true);
+    }
     // Vercel preview deployments get random per-deployment subdomains
     // (e.g. ai-38m3p7s7q-wither2.vercel.app), so they can never be fully
     // listed. Allow any *.vercel.app origin that ends with the project's
@@ -69,7 +77,11 @@ app.use(express.json({ limit: "1mb" }));
 // ---------- Request logging ----------
 app.use((req: Request, _res: Response, next: NextFunction) => {
   if (req.path !== "/health") {
-    console.log(`${new Date().toISOString()} ${req.method} ${req.path}`);
+    // A preview URL carries a bearer capability in its path. Logging it writes a
+    // live credential to Render's logs, where anyone with log access could
+    // reach the running dev server.
+    const path = req.path.replace(/\/preview\/p\/\d+\/[^/]+/g, "/preview/p/:port/:redacted");
+    console.log(`${new Date().toISOString()} ${req.method} ${path}`);
   }
   next();
 });
@@ -88,6 +100,9 @@ app.use("/api/projects", projectRoutes);
 app.use("/api/projects", agentRoutes); // POST /api/projects/:id/agent
 app.use("/api/settings", settingsRoutes);
 app.use("/api/conversations", conversationRoutes);
+// Before workspaceRoutes, and not behind requireAuth: an iframe cannot send an
+// Authorization header, so the preview's capability token is its credential.
+app.use("/api/workspace", previewRoutes);
 app.use("/api/workspace", workspaceRoutes);
 app.use("/api/workspace", rollbackRoutes); // undo / redo / checkpoints
 
@@ -111,7 +126,15 @@ app.use((err: Error & { statusCode?: number }, _req: Request, res: Response, _ne
 // tier sleeps); connect + migrate in the background with retries.
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`DAI API listening on 0.0.0.0:${PORT}`);
-  console.log(`CORS origins: ${allowedOrigins.length ? allowedOrigins.join(", ") : "(open — set ALLOWED_ORIGINS)"}`);
+  if (allowedOrigins.length === 0) {
+    if (process.env.NODE_ENV === "production") {
+      console.error("[cors] ALLOWED_ORIGINS is empty in production: every browser request will be refused. Set the web app's origins.");
+    } else {
+      console.warn("[cors] ALLOWED_ORIGINS is empty; any origin is accepted outside production.");
+    }
+  } else {
+    console.log(`CORS origins: ${allowedOrigins.join(", ")}`);
+  }
 });
 
 async function connectWithRetries(maxRetries = 10): Promise<void> {
@@ -161,6 +184,10 @@ async function startQueueWorker(): Promise<void> {
 }
 
 connectWithRetries()
+  .then(async () => {
+    const { configureCheckpointImages } = await import("./lib/runtime.js");
+    if (configureCheckpointImages()) console.log("[runtime] checkpoint images stored in R2");
+  })
   .then(() => ensureSchema())
   .then(() => startQueueWorker())
   .catch((err) => {

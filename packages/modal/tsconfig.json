@@ -2,7 +2,13 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "./src",
+    // The base config maps workspace packages at their *source*, which a package
+    // with a rootDir cannot import. Resolve @dai/runtime the way the built API
+    // does — through its published declarations.
+    "paths": {
+      "@dai/runtime": ["../runtime/dist/index.d.ts"]
+    }
   },
   "include": ["src/**/*.ts"]
 }

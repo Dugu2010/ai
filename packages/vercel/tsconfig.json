@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    // Resolved through the built declarations, the way the API consumes workspace
+    // packages: this package has a rootDir, so it cannot import a sibling's source.
+    "paths": {
+      "@dai/runtime": ["../runtime/dist/index.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

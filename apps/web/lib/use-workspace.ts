@@ -175,6 +175,9 @@ export function useWorkspace(projectId: string, enabled: boolean): WorkspaceCont
     async (path: string) => {
       const token = ++fileRequestRef.current;
       setSelectedFile(path);
+      // Clear the body first: without this the editor keeps showing the
+      // previous file's text under the new file's name until the read lands.
+      setFileContent("");
       setFileLoading(true);
       setFileError(null);
       setDirty(false);
@@ -298,14 +301,16 @@ export function useWorkspace(projectId: string, enabled: boolean): WorkspaceCont
     void (async () => {
       await loadProject();
       if (!active) return;
-      const latest = await loadStatus();
-      if (!active || latest?.state === "running") return;
-      await loadDir(ROOT_PATH);
+      await loadStatus();
+      // The root listing is deliberately not fetched here: reading workspace
+      // files needs compute, and GET /api/workspace acquires it, so a mount used
+      // to boot a Sandbox for any cold project. The status-driven effect below
+      // lists the root once the runtime reports itself running.
     })();
     return () => {
       active = false;
     };
-  }, [enabled, projectId, loadProject, loadStatus, loadDir]);
+  }, [enabled, projectId, loadProject, loadStatus]);
 
   // Reading files needs compute, so the root listing is retried the first time
   // the runtime reports itself as running.

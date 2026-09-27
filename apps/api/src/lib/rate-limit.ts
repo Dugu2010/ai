@@ -16,15 +16,38 @@ const INITIAL_BACKOFF_MS = 60 * 1000;
 
 const failedAttempts = new Map<string, RateLimitEntry>();
 
+/** Bound on tracked identifiers; a flood of distinct keys must not grow forever. */
+const MAX_TRACKED_IDENTIFIERS = 10_000;
+
 export function getIpIdentifier(req: { headers: Record<string, unknown> }): string {
   const forwarded = req.headers["x-forwarded-for"];
   if (typeof forwarded === "string" && forwarded.length > 0) {
-    const first = forwarded.split(",")[0];
-    if (first) return first.trim();
+    // The right-most hop: the left-most is whatever the client put in the
+    // header, so keying on it lets every request choose its own bucket and
+    // defeats the limiter entirely.
+    const hops = forwarded
+      .split(",")
+      .map((hop) => hop.trim())
+      .filter(Boolean);
+    const last = hops[hops.length - 1];
+    if (last) return last;
   }
   const realIp = req.headers["x-real-ip"];
-  if (typeof realIp === "string") return realIp;
+  if (typeof realIp === "string" && realIp) return realIp;
   return "unknown";
+}
+
+/** Drop windows that can no longer block anyone, so the map cannot grow without bound. */
+function pruneExpired(now: number): void {
+  for (const [key, entry] of failedAttempts) {
+    const blocked = entry.blockedUntil && entry.blockedUntil > now;
+    if (!blocked && now - entry.lastAttempt > WINDOW_MS) failedAttempts.delete(key);
+  }
+  if (failedAttempts.size <= MAX_TRACKED_IDENTIFIERS) return;
+  const byAge = [...failedAttempts.entries()].sort((a, b) => a[1].lastAttempt - b[1].lastAttempt);
+  for (const [key] of byAge.slice(0, failedAttempts.size - MAX_TRACKED_IDENTIFIERS)) {
+    failedAttempts.delete(key);
+  }
 }
 
 export function checkRateLimit(req: { headers: Record<string, unknown> }): {
@@ -60,6 +83,7 @@ export function checkRateLimit(req: { headers: Record<string, unknown> }): {
 export function recordFailedAttempt(req: { headers: Record<string, unknown> }): void {
   const identifier = getIpIdentifier(req);
   const now = Date.now();
+  pruneExpired(now);
   const entry = failedAttempts.get(identifier);
   if (entry) {
     entry.attempts++;

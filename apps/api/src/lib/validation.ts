@@ -151,3 +151,46 @@ export function validateCommandOptions(body: {
 export const MAX_REQUEST_BODY_SIZE = 1024 * 1024; // 1MB
 export const MAX_OUTPUT_SIZE = 1024 * 1024; // 1MB
 export const MAX_FILE_READ_SIZE = 1024 * 1024; // 1MB
+
+/** Addresses a user-supplied provider URL may not point at. */
+const PRIVATE_HOSTS = [
+  /^(?:10|127)\./,
+  /^169\.254\./,
+  /^172\.(?:1[6-9]|2\d|3[01])\./,
+  /^192\.168\./,
+  /^(?:0|localhost)$/i,
+  /^(?:fc|fd)/, // IPv6 unique-local
+  /^fe80:/i, // IPv6 link-local
+  /^::1$/,
+];
+
+/**
+ * A user-chosen NIM base URL is fetched server side with an Authorization
+ * header, so it is an outbound-request primitive under attacker control: it
+ * must be an https URL that cannot reach Render's internal network or the
+ * cloud metadata endpoint. The operator's own NIM_BASE_URL env is not filtered,
+ * so a private or local inference server stays reachable by configuration.
+ */
+export function validateProviderBaseUrl(input: string): CommandValidationResult & { normalized?: string } {
+  const raw = input.trim();
+  if (raw.length === 0 || raw.length > 2048) {
+    return { valid: false, error: "Base URL must be between 1 and 2048 characters" };
+  }
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { valid: false, error: "Base URL must be an absolute URL" };
+  }
+  if (url.protocol !== "https:") {
+    return { valid: false, error: "Base URL must use https" };
+  }
+  if (url.username || url.password) {
+    return { valid: false, error: "Base URL must not embed credentials" };
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!host || PRIVATE_HOSTS.some((pattern) => pattern.test(host))) {
+    return { valid: false, error: "Base URL must not point at a private or loopback address" };
+  }
+  return { valid: true, normalized: url.toString() };
+}

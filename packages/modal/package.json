@@ -23,6 +23,7 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "@dai/runtime": "workspace:*",
     "modal": "0.10.1"
   },
   "devDependencies": {

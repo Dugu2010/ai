@@ -27,6 +27,7 @@ const C = "/workspace/src/c.ts";
 const TIGHT_LIMITS: BudgetLimits = {
   maxActivationsPerRun: 1,
   maxExecCallsPerRun: 40,
+  maxFileOpsPerRun: 600,
   maxRuntimeSecondsPerRun: 600,
   maxCommandTimeoutMs: 300_000,
   maxAgentIterations: 12,
@@ -40,6 +41,8 @@ interface RunOptions {
   limits?: Partial<BudgetLimits>;
   aborted?: () => boolean;
   loop?: LoopDetector;
+  onCommandTimeout?: () => void;
+  previewGate?: () => Promise<string | null>;
 }
 
 function runLoop(options: RunOptions) {
@@ -62,6 +65,8 @@ function runLoop(options: RunOptions) {
     loop,
     previewPort: 3_000,
     aborted: options.aborted,
+    onCommandTimeout: options.onCommandTimeout,
+    previewGate: options.previewGate,
     recordToolCall: async (entry) => {
       toolResults.push({ name: entry.name, result: entry.result, success: entry.success });
     },
@@ -76,6 +81,7 @@ const edit = (path: string, content: string) => ({
 });
 const command = (text: string) => ({ name: "run_command", arguments: { command: text } });
 const read = (path: string) => ({ name: "read_file", arguments: { path } });
+const list = (path: string) => ({ name: "list_files", arguments: { path } });
 
 describe("one activation per run", () => {
   it("never acquires or creates compute itself; the caller attaches the workspace", async () => {
@@ -111,6 +117,30 @@ describe("one activation per run", () => {
     expect(outcome.outcome).toBe("budget_exhausted");
     expect(workspace.execs.map((entry) => entry.command)).toEqual(["npm test", "npm run build"]);
     expect(outcome.stopReason).toMatch(/runtime commands/);
+  });
+
+  it("charges wall clock, so the runtime-seconds ceiling can actually be reached", async () => {
+    // Regression guard: `runtimeMs` was declared, displayed in the budget meter
+    // and enforced by a ceiling, but nothing ever recorded time against it, so
+    // `maxRuntimeSecondsPerRun` could not stop a run and the meter read 0s.
+    const workspace = new FakeWorkspace({ files: { [A]: "alpha" } });
+    const slow = workspace.exec.bind(workspace);
+    workspace.exec = async (command, options) => {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      return slow(command, options);
+    };
+
+    const { result, budget } = await runLoop({
+      workspace,
+      limits: { maxRuntimeSecondsPerRun: 0.005 },
+      turns: [{ toolCalls: [command("npm test")] }],
+    });
+    const outcome = await result;
+
+    expect(outcome.runtimeMs).toBeGreaterThanOrEqual(5);
+    expect(budget.summary().exhausted).toBe("runtime_seconds");
+    expect(outcome.outcome).toBe("budget_exhausted");
+    expect(outcome.stopReason).toMatch(/runtime/);
   });
 });
 
@@ -207,6 +237,36 @@ describe("batched mutations", () => {
     expect(workspace.appliedMutations).toHaveLength(1);
     expect(workspace.appliedMutations[0]?.map((entry) => entry.path)).toEqual([A, B, C]);
     expect(workspace.countOf("applyFileMutations")).toBe(1);
+  });
+
+  it("keeps BOTH edits when one turn edits the same file twice", async () => {
+    // Two edit_file calls on one path in a single turn is the common case. The
+    // plan cache used to be cleared between them, so the second edit was computed
+    // from bytes that were already superseded: it was reported as queued, then
+    // rejected by the runtime as a conflict, and the checkpoint's post-image
+    // described a file state that never existed.
+    const workspace = new FakeWorkspace({ files: { [A]: "one two" } });
+    const { result, activity } = await runLoop({
+      workspace,
+      turns: [
+        {
+          toolCalls: [
+            { name: "edit_file", arguments: { path: A, oldString: "one", newString: "1" } },
+            { name: "edit_file", arguments: { path: A, oldString: "two", newString: "2" } },
+          ],
+        },
+        { content: "Done." },
+      ],
+    });
+    const outcome = await result;
+
+    const entries = workspace.appliedMutations[0] ?? [];
+    expect(entries).toHaveLength(2);
+    // The second edit chains off the first's result rather than off the pre-edit bytes.
+    expect(entries[1]?.expectCurrent).toBe(entries[0]?.content);
+    expect(workspace.files.get(A)).toBe("1 2");
+    expect(outcome.filesChanged).toBe(2);
+    expect(activity.events.some((event) => event.type === "agent.error")).toBe(false);
   });
 
   it("flushes the checkpoint BEFORE the batched write is applied", async () => {
@@ -515,6 +575,116 @@ describe("observable activity only", () => {
     const completed = activity.titles("agent.command.completed")[0] ?? "";
     expect(completed).toMatch(/timed out after/);
     expect(workspace.execs[0]?.command).toContain("node");
+  });
+
+  it("reports a timeout to the caller once, and only for the command that hit it", async () => {
+    const holder = { count: 0 };
+    const workspace = new FakeWorkspace({
+      files: {},
+      execResults: [
+        { match: "node", stdout: "", exitCode: null, timedOut: true },
+        { match: "echo", stdout: "hi", exitCode: 0 },
+      ],
+    });
+    const { result } = await runLoop({
+      workspace,
+      onCommandTimeout: () => {
+        holder.count += 1;
+      },
+      turns: [
+        { toolCalls: [command("node build.js")] },
+        { toolCalls: [command("echo done")] },
+      ],
+    });
+    await result;
+    expect(holder.count).toBe(1);
+  });
+
+  it("does not report an ordinary command failure as a timeout", async () => {
+    const holder = { count: 0 };
+    const workspace = new FakeWorkspace({
+      files: {},
+      execResults: [{ match: "tsc", stdout: "", exitCode: 2 }],
+    });
+    const { result } = await runLoop({
+      workspace,
+      onCommandTimeout: () => {
+        holder.count += 1;
+      },
+      turns: [{ toolCalls: [command("tsc --noEmit")] }],
+    });
+    await result;
+    expect(holder.count).toBe(0);
+  });
+
+  it("declines a dev server when the budget gate refuses, without touching the runtime", async () => {
+    const workspace = new FakeWorkspace({ files: {} });
+    const { result, toolResults } = await runLoop({
+      workspace,
+      previewGate: async () => "Previews are paused for this month; finish with the file tools.",
+      turns: [{ toolCalls: [{ name: "start_dev_server", arguments: { command: "npm run dev", port: 3_000 } }] }],
+    });
+    await result;
+    expect(workspace.countOf("startDevServer")).toBe(0);
+    expect(toolResults[0]?.success).toBe(false);
+    expect(toolResults[0]?.result).toMatch(/finish with the file tools/);
+  });
+
+  it("starts a dev server when the gate is open", async () => {
+    const workspace = new FakeWorkspace({ files: {} });
+    const { result, toolResults } = await runLoop({
+      workspace,
+      previewGate: async () => null,
+      turns: [{ toolCalls: [{ name: "start_dev_server", arguments: { command: "npm run dev", port: 3_000 } }] }],
+    });
+    await result;
+    expect(workspace.countOf("startDevServer")).toBe(1);
+    expect(toolResults[0]?.success).toBe(true);
+  });
+
+  it("runs a read-and-write task on a command budget of one", async () => {
+    // The provider swap is only worth anything if this holds: the two byte
+    // transfers must not consume the metered allowance, or a task that spends
+    // nothing gets stopped as though it spent everything.
+    const workspace = new FakeWorkspace({ files: { [A]: "alpha", [B]: "beta" } });
+    const { result, toolResults } = await runLoop({
+      workspace,
+      limits: { maxExecCallsPerRun: 1 },
+      turns: [
+        {
+          toolCalls: [
+            read(A),
+            read(B),
+            edit("/workspace/src/c.ts", "gamma"),
+            edit("/workspace/src/d.ts", "delta"),
+          ],
+        },
+      ],
+    });
+    await result;
+    expect(toolResults.filter((entry) => entry.success)).toHaveLength(4);
+    expect(toolResults.some((entry) => /budget exhausted/i.test(entry.result))).toBe(false);
+  });
+
+  it("charges a directory listing as the command the SDK actually runs", async () => {
+    // `fs.readdir` is a `find` inside the SDK, so listing is metered. This test
+    // exists to stop anyone "optimising" the table back on the strength of the
+    // method's name.
+    const workspace = new FakeWorkspace({ files: { [A]: "alpha" } });
+    const { result, toolResults } = await runLoop({
+      workspace,
+      limits: { maxExecCallsPerRun: 1 },
+      turns: [
+        {
+          toolCalls: [list("/workspace"), list("/workspace/src")],
+        },
+      ],
+    });
+    await result;
+    expect(toolResults).toHaveLength(2);
+    expect(toolResults[0]?.success).toBe(true);
+    expect(toolResults[1]?.success).toBe(false);
+    expect(toolResults[1]?.result).toMatch(/Command budget exhausted/);
   });
 
   it("emits a file-changed event with the paths that really landed", async () => {

@@ -162,6 +162,8 @@ export class CheckpointCollector {
 
 export interface RestoreOutcome {
   checkpointId: string;
+  /** The run whose edits this checkpoint recorded, for timeline attribution. */
+  runId: string | null;
   label: string;
   status: "undone" | "redone" | "partial" | "blocked";
   results: MutationResult[];
@@ -200,6 +202,7 @@ async function apply(
   if (!checkpoint) {
     return {
       checkpointId,
+      runId: null,
       label: "unknown",
       status: "blocked",
       results: [],
@@ -211,6 +214,7 @@ async function apply(
     const blocked = checkpoint.files.filter((file) => !file.reversible);
     return {
       checkpointId,
+      runId: checkpoint.runId,
       label: checkpoint.label,
       status: "blocked",
       results: [],
@@ -233,6 +237,7 @@ async function apply(
   const conflicts = results.filter((result) => result.status === "conflict");
   return {
     checkpointId: checkpoint.id,
+    runId: checkpoint.runId,
     label: checkpoint.label,
     status: clean ? (direction === "undo" ? "undone" : "redone") : "partial",
     results,
@@ -270,6 +275,7 @@ export async function undoLatest(
   if (!checkpoint) {
     return {
       checkpointId: "",
+      runId: null,
       label: "",
       status: "blocked",
       results: [],
@@ -279,7 +285,13 @@ export async function undoLatest(
   return apply(workspace, projectId, checkpoint.id, "undo", timeoutMs);
 }
 
-/** Re-apply the oldest undone checkpoint. */
+/**
+ * Re-apply the next undone checkpoint.
+ *
+ * Redo walks forward through history (earliest undone checkpoint first): undoing
+ * run B then run A has to be redone A then B, or the two runs' edits land in the
+ * wrong order and the later one's files report a conflict.
+ */
 export async function redoLatest(
   workspace: Workspace,
   projectId: string,
@@ -289,6 +301,7 @@ export async function redoLatest(
   if (!checkpoint) {
     return {
       checkpointId: "",
+      runId: null,
       label: "",
       status: "blocked",
       results: [],

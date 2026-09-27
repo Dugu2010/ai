@@ -4,6 +4,7 @@ import { requireAuth, getAuthUser } from "../lib/auth.js";
 import {
   acquireWorkspace,
   duplicateProjectWorkspace,
+  runtimeProvider,
   isRuntimeConfigured,
   purgeRuntimeWorkspace,
   recordWorkspaceUsage,
@@ -11,7 +12,7 @@ import {
   terminateRuntime,
 } from "../lib/runtime.js";
 import { MAX_REQUEST_BODY_SIZE } from "../lib/validation.js";
-import { requestSandboxSlot } from "../lib/sandbox-queue.js";
+import { MAX_ACTIVE_SANDBOXES, requestSandboxSlot } from "../lib/sandbox-queue.js";
 import { volumeSubPath } from "@dai/modal";
 
 const router = Router();
@@ -89,8 +90,9 @@ router.post("/", async (req: Request, res: Response) => {
     try {
       const slot = await requestSandboxSlot(user.userId, project.id, "create");
       if (!slot.acquired) {
-        await updateProject(project.id, { status: "queued", lastError: `Queue full (${slot.activeCount}/10), your request has been queued` });
-        res.status(201).json({ ...project, status: "queued", lastError: `Queue full (${slot.activeCount}/10), your request has been queued` });
+        const queued = `Queue full (${slot.activeCount}/${MAX_ACTIVE_SANDBOXES}), your request has been queued`;
+        await updateProject(project.id, { status: "queued", lastError: queued });
+        res.status(201).json({ ...project, status: "queued", lastError: queued });
         return;
       }
       const { updated } = await provisionSandbox(project);
@@ -156,6 +158,21 @@ router.get("/:id", async (req: Request, res: Response) => {
 });
 
 /**
+ * A fork slug that is not already taken.
+ *
+ * Forking twice produced `${slug}-fork` both times, so the second fork died on
+ * the UNIQUE(user_id, slug) constraint and surfaced as a raw Postgres error.
+ */
+async function uniqueForkSlug(userId: string, base: string): Promise<string> {
+  const taken = new Set((await listProjects(userId)).map((project) => project.slug));
+  let candidate = `${base}-fork`;
+  for (let attempt = 2; taken.has(candidate) && attempt < 50; attempt += 1) {
+    candidate = `${base}-fork-${attempt}`;
+  }
+  return candidate;
+}
+
+/**
  * Fork a project by copying its durable workspace into a new project subPath.
  *
  * The copy is server-side inside the Volume, so neither the source nor the
@@ -175,7 +192,7 @@ router.post("/:id/fork", async (req: Request, res: Response) => {
     }
 
     const newProject = await createProject(user.userId, {
-      slug: `${project.slug}-fork`,
+      slug: await uniqueForkSlug(user.userId, project.slug),
       name: `${project.name} (Fork)`,
       description: project.description ?? undefined,
     });
@@ -189,7 +206,7 @@ router.post("/:id/fork", async (req: Request, res: Response) => {
     }
 
     const updated = await updateProject(newProject.id, {
-      runtimeProvider: "modal",
+      runtimeProvider: runtimeProvider(),
       runtimeVolumeSubPath: volumeSubPath(newProject.id),
       status: "provisioning",
     });
@@ -197,6 +214,11 @@ router.post("/:id/fork", async (req: Request, res: Response) => {
     res.json(updated);
   } catch (error: any) {
     console.error("[projects:fork]", error.message);
+    // Two forks created at once can still land on the same slug.
+    if (error.code === "23505") {
+      res.status(409).json({ error: "A project with that name already exists. Try forking again." });
+      return;
+    }
     res.status(error.statusCode ?? 500).json({ error: error.message });
   }
 });

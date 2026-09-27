@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import workspaceRouter from "../src/routes/workspace.js";
+import agentRouter from "../src/routes/agent.js";
+import projectsRouter from "../src/routes/projects.js";
+import rollbackRouter from "../src/routes/rollback.js";
 
 /**
  * The public HTTP surface.
@@ -7,7 +11,20 @@ import { describe, expect, it } from "vitest";
  * requirement, not an accident of wiring. This test reads the mounted routers
  * themselves rather than asserting a string in a source file, so re-adding a
  * command endpoint — under any name — fails here.
+ *
+ * The routers are imported statically: loading `@dai/modal` costs several
+ * seconds, and a dynamic import inside the `it` body charges that to the
+ * 5s test timeout, which the first router to load would always exceed.
  */
+
+type Router = { stack: unknown[] };
+
+const ROUTERS: Array<[string, Router]> = [
+  ["workspace", workspaceRouter as unknown as Router],
+  ["agent", agentRouter as unknown as Router],
+  ["projects", projectsRouter as unknown as Router],
+  ["rollback", rollbackRouter as unknown as Router],
+];
 
 type Layer = {
   route?: { path: string; methods: Record<string, boolean> };
@@ -28,21 +45,14 @@ function endpoints(router: { stack: unknown[] }): string[] {
 const EXEC_LIKE = /(command|exec|shell|terminal|tty|spawn|run-)/i;
 
 describe("no arbitrary-command endpoint is mounted", () => {
-  it.each([
-    ["workspace", "../src/routes/workspace.js"],
-    ["agent", "../src/routes/agent.js"],
-    ["projects", "../src/routes/projects.js"],
-    ["rollback", "../src/routes/rollback.js"],
-  ] as const)("%s router exposes no exec-like route", async (_name, modulePath) => {
-    const module = (await import(modulePath)) as { default: { stack: unknown[] } };
-    const routes = endpoints(module.default);
+  it.each(ROUTERS)("%s router exposes no exec-like route", (_name, router) => {
+    const routes = endpoints(router);
     expect(routes.length, `${_name} router mounted nothing — wiring changed?`).toBeGreaterThan(0);
     expect(routes.filter((route) => EXEC_LIKE.test(route))).toEqual([]);
   });
 
-  it("keeps the workspace router to file, status, preview and lifecycle reads", async () => {
-    const module = (await import("../src/routes/workspace.js")) as { default: { stack: unknown[] } };
-    const paths = [...new Set(endpoints(module.default).map((route) => route.split(" ")[1]))];
+  it("keeps the workspace router to file, status, preview and lifecycle reads", () => {
+    const paths = [...new Set(endpoints(workspaceRouter as unknown as Router).map((route) => route.split(" ")[1]))];
     expect(paths.sort()).toEqual([
       "/:projectId",
       "/:projectId/concurrency",

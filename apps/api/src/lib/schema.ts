@@ -47,12 +47,19 @@ export async function ensureSchema(): Promise<void> {
     ALTER TABLE projects ADD COLUMN IF NOT EXISTS bootup_type TEXT;
     ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_up_to_date BOOLEAN;
 
-    -- Runtime provider columns. sandbox_id is reused to hold the live Modal
-    -- Sandbox id; the CodeSandbox identifier is retired into
-    -- legacy_sandbox_id rather than dropped, so nothing is silently lost.
+    -- Runtime provider columns. sandbox_id is reused to hold the live provider
+    -- handle; for Vercel that is the deterministic sandbox *name*, which is what
+    -- resume is keyed on, and for Modal it held the opaque sandbox id.
     ALTER TABLE projects ADD COLUMN IF NOT EXISTS runtime_provider TEXT;
     ALTER TABLE projects ADD COLUMN IF NOT EXISTS runtime_volume_subpath TEXT;
     ALTER TABLE projects ADD COLUMN IF NOT EXISTS legacy_sandbox_id TEXT;
+    -- Vercel specifics: the project's own drive, its R2 archive prefix, whether
+    -- the archive may be stale, and the escalation state for sizing.
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS runtime_drive_name TEXT;
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS runtime_archive_key TEXT;
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS runtime_escalations INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS runtime_resource_tier INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS last_escalated_at TIMESTAMPTZ;
     -- Migration outcome per project: modal_workspace_ready | modal_files_imported |
     -- modal_awaiting_import | modal_import_failed. Written by scripts/migrate-runtime.ts.
     ALTER TABLE projects ADD COLUMN IF NOT EXISTS runtime_migration_status TEXT;
@@ -110,15 +117,21 @@ export async function ensureSchema(): Promise<void> {
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS tool_name TEXT;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS tool_args JSONB;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS tool_result JSONB;
+    ALTER TABLE checkpoint_files ADD COLUMN IF NOT EXISTS content_before_key TEXT;
+    ALTER TABLE checkpoint_files ADD COLUMN IF NOT EXISTS content_after_key TEXT;
 
     CREATE TABLE IF NOT EXISTS user_settings (
       user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-      nim_model TEXT NOT NULL DEFAULT 'meta/llama-3.1-405b-instruct',
+      -- Empty means "follow the API's NIM_MODEL env var". A concrete default
+      -- here would silently outrank the env config for every new account.
+      nim_model TEXT NOT NULL DEFAULT '',
       nim_base_url TEXT NOT NULL DEFAULT 'https://integrate.api.nvidia.com/v1',
       nim_api_key_enc TEXT,
       idle_timeout_seconds INTEGER NOT NULL DEFAULT 30,
       UNIQUE (user_id)
     );
+
+    ALTER TABLE user_settings ALTER COLUMN nim_model SET DEFAULT '';
 
     -- ---------------------------------------------------------------------
     -- Agent runs: one row per user task. Holds the state machine position and
@@ -186,8 +199,12 @@ export async function ensureSchema(): Promise<void> {
       checkpoint_id UUID NOT NULL REFERENCES checkpoints(id) ON DELETE CASCADE,
       path TEXT NOT NULL,
       change_kind TEXT NOT NULL,                -- create | modify | delete | rename
+      -- Either inline (legacy and the default when no object store is wired) or
+      -- a key naming the object that holds the same bytes.
       content_before TEXT,
       content_after TEXT,
+      content_before_key TEXT,
+      content_after_key TEXT,
       existed_before BOOLEAN NOT NULL,
       size_before BIGINT NOT NULL DEFAULT 0,
       size_after BIGINT NOT NULL DEFAULT 0,
@@ -197,6 +214,46 @@ export async function ensureSchema(): Promise<void> {
 
     -- Redo stack: which checkpoints a user has undone, so redo can re-apply.
     ALTER TABLE checkpoints ADD COLUMN IF NOT EXISTS undone_at TIMESTAMPTZ;
+
+    -- ---------------------------------------------------------------------
+    -- Compute ledger. One row per provider session.
+    --
+    -- The monthly allowance is enforced from these rows rather than from a
+    -- dashboard: on the free tier, exceeding a quota does not produce a bill, it
+    -- pauses sandbox creation for 30 days, so the app has to know its own spend
+    -- before it boots the machine that would overspend it.
+    -- ---------------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS runtime_usage (
+      id BIGSERIAL PRIMARY KEY,
+      project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      run_id UUID REFERENCES agent_runs(id) ON DELETE SET NULL,
+      sandbox_name TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'agent',      -- agent | preview | maintenance
+      vcpus INTEGER NOT NULL DEFAULT 1,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      stopped_at TIMESTAMPTZ,
+      active_cpu_ms BIGINT NOT NULL DEFAULT 0,
+      provisioned_ms BIGINT NOT NULL DEFAULT 0,
+      egress_bytes BIGINT NOT NULL DEFAULT 0,
+      -- Set when a session was never reported closed, so a crash cannot leave
+      -- the month's total permanently understated.
+      reconciled BOOLEAN NOT NULL DEFAULT false
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_runtime_usage_created ON runtime_usage(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_runtime_usage_open ON runtime_usage(stopped_at) WHERE stopped_at IS NULL;
+
+    -- The same period aggregated, because every boot has to read it and scanning
+    -- the ledger each time would grow with the month.
+    CREATE TABLE IF NOT EXISTS runtime_quota_state (
+      month TEXT PRIMARY KEY,                    -- 'YYYY-MM', UTC
+      active_cpu_ms BIGINT NOT NULL DEFAULT 0,
+      provisioned_gb_ms BIGINT NOT NULL DEFAULT 0,
+      creations INTEGER NOT NULL DEFAULT 0,
+      egress_bytes BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
 
     CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
     CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id);
@@ -227,6 +284,31 @@ export async function ensureSchema(): Promise<void> {
   );
   if (retired.rowCount) {
     console.log(`[db] retired ${retired.rowCount} legacy CodeSandbox runtime identifier(s)`);
+  }
+
+  // Retirement of Modal runtime identifiers, for a deployment switching to
+  // Vercel. A Modal sandbox id is meaningless to `Sandbox.get`, which is keyed by
+  // name, so leaving it in `sandbox_id` would make every acquire attempt a resume
+  // against an id that has never existed.
+  //
+  // Gated on the provider actually being Vercel: running this against a deployment
+  // still using Modal would clear the live handles and orphan every running
+  // sandbox. Bytes are not touched here — scripts/migrate-runtime-v2.ts copies the
+  // Volume contents to the mirror first, and this UPDATE follows that.
+  if ((process.env.RUNTIME_PROVIDER ?? "modal").trim().toLowerCase() === "vercel") {
+    const moved = await pool.query(
+      `UPDATE projects
+          SET legacy_sandbox_id = COALESCE(legacy_sandbox_id, sandbox_id),
+              sandbox_id = NULL,
+              runtime_provider = 'vercel',
+              runtime_volume_subpath = 'projects/' || id,
+              status = 'provisioning'
+        WHERE runtime_provider = 'modal'
+        RETURNING id`
+    );
+    if (moved.rowCount) {
+      console.log(`[db] retired ${moved.rowCount} Modal runtime identifier(s); awaiting workspace import`);
+    }
   }
   console.log("[db] schema ensured");
 }
