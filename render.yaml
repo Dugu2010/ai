@@ -51,10 +51,13 @@ services:
       # Optional non-secret overrides: MODAL_CPU, MODAL_MEMORY_MIB,
       # MODAL_IDLE_TIMEOUT_MS, MODAL_VOLUME_NAME, MODAL_PREVIEW_PORTS.
       #
-      # To move execution onto Vercel Sandbox + Drives with an R2 mirror, add
-      # VERCEL_TOKEN and the R2_* values as secrets and set RUNTIME_PROVIDER to
-      # vercel -- but only after `bun run tsx scripts/migrate-runtime-v2.ts`
-      # has copied every workspace out of the Modal Volume. See
+      # To move execution onto Vercel Sandbox + Drives, add all THREE of
+      # VERCEL_TOKEN, VERCEL_PROJECT_ID and VERCEL_TEAM_ID as secrets (outside a
+      # Vercel deployment the SDK takes a static token and requires the complete
+      # set) plus RUNTIME_PROVIDER=vercel, which is the default. Do this BEFORE
+      # the first Sandbox/Drive is created; R2_* then turn on the cold-read
+      # mirror, and instances migrating off the Modal Volume must run
+      # `bun run tsx scripts/migrate-runtime-v2.ts` first. See
       # VERCEL_RUNTIME_MIGRATION.md for the order of operations.
       #
       # The Modal image is built once out-of-band (never during a request):

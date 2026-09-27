@@ -76,6 +76,8 @@ export interface VercelRuntimeConfig {
   snapshotExpirationMs: number;
   /** Cap on a project's mirrored workspace bytes. */
   maxProjectWorkspaceBytes: number;
+  /** Static API credentials when running outside Vercel; absent means OIDC. */
+  credentials?: VercelCredentials | null;
   r2: R2Config;
   budget: MonthlyBudget;
 }
@@ -149,6 +151,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): VercelRunti
     keepLastSnapshots: intEnv("VERCEL_SNAPSHOT_KEEP_LAST", 1),
     snapshotExpirationMs: intEnv("VERCEL_SNAPSHOT_EXPIRATION_MS", 7 * 24 * HOUR_MS),
     maxProjectWorkspaceBytes: intEnv("MAX_PROJECT_WORKSPACE_BYTES", 50 * GIB),
+    credentials: credentialsFromEnv(env),
     r2: {
       accountId: strEnv("R2_ACCOUNT_ID", ""),
       bucket: strEnv("R2_BUCKET", ""),
@@ -170,9 +173,37 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): VercelRunti
   };
 }
 
-/** Credentials the SDK needs. Read lazily so a dev machine without them still imports the module. */
+/**
+ * Static API credentials for running outside Vercel.
+ *
+ * The SDK reads no `VERCEL_TOKEN` on its own — outside a Vercel deployment it
+ * falls back to OIDC and fails. `getCredentials` accepts `{token, projectId,
+ * teamId}` per call, and *all three* or none: a partial set throws rather than
+ * silently downgrading, so the check here is complete-or-absent too.
+ */
+export interface VercelCredentials {
+  token: string;
+  projectId: string;
+  teamId: string;
+}
+
+export function credentialsFromEnv(env: NodeJS.ProcessEnv = process.env): VercelCredentials | null {
+  const token = env.VERCEL_TOKEN?.trim();
+  const projectId = env.VERCEL_PROJECT_ID?.trim();
+  const teamId = env.VERCEL_TEAM_ID?.trim();
+  return token && projectId && teamId ? { token, projectId, teamId } : null;
+}
+
+/** Credentials the SDK needs: a complete static set, or an OIDC context. */
 export function isRuntimeConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean(env.VERCEL_TOKEN || (env.VERCEL_OIDC_TOKEN && env.VERCEL_PROJECT_ID));
+  return Boolean(
+    credentialsFromEnv(env) || (env.VERCEL_OIDC_TOKEN && env.VERCEL_PROJECT_ID)
+  );
+}
+
+/** Which pieces a static-token setup is missing, for the 503 message. */
+export function missingCredentialNames(env: NodeJS.ProcessEnv = process.env): string[] {
+  return ["VERCEL_TOKEN", "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID"].filter((name) => !env[name]?.trim());
 }
 
 /** R2 is optional at boot: a project can run with no mirror, it just cannot be read cold. */

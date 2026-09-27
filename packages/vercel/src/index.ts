@@ -1,12 +1,15 @@
 export {
   configFromEnv,
+  credentialsFromEnv,
   isMirrorConfigured,
   isRuntimeConfigured,
+  missingCredentialNames,
   sandboxName,
   driveName,
   type MonthlyBudget,
   type R2Config,
   type ResourceTier,
+  type VercelCredentials,
   type VercelRuntimeConfig,
 } from "./config.js";
 

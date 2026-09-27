@@ -25,6 +25,8 @@ import {
   WorkspaceMirror,
   configFromEnv as vercelConfigFromEnv,
   isMirrorConfigured,
+  isRuntimeConfigured as vercelConfigured,
+  missingCredentialNames,
   type MonthlyBudget,
   type VercelRuntimeConfig,
   type VercelWorkspace,
@@ -106,9 +108,7 @@ export function runtimeDefaultPort(): number {
 
 /** Credentials never leave Render: each provider reads its own from the environment. */
 export function isRuntimeConfigured(): boolean {
-  if (runtimeProvider() === "vercel") {
-    return Boolean(process.env.VERCEL_TOKEN || (process.env.VERCEL_OIDC_TOKEN && process.env.VERCEL_PROJECT_ID));
-  }
+  if (runtimeProvider() === "vercel") return vercelConfigured();
   return Boolean(process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET);
 }
 
@@ -185,7 +185,9 @@ function runtimeService(): RuntimeService {
     const provider = runtimeProvider();
     throw new RuntimeOperationError(
       provider === "vercel"
-        ? "No execution runtime is configured. Set VERCEL_TOKEN (and R2 credentials for the workspace mirror) on the backend."
+        ? `No execution runtime is configured. Missing on the backend: ${
+            missingCredentialNames().join(", ") || "VERCEL_TOKEN, VERCEL_PROJECT_ID, VERCEL_TEAM_ID"
+          } (or VERCEL_OIDC_TOKEN + VERCEL_PROJECT_ID).`
         : "No execution runtime is configured. Set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET on the backend.",
       "unavailable"
     );

@@ -39,7 +39,7 @@ function runtimeNotConfigured(res: Response): boolean {
   res.status(503).json({
     error:
       provider === "vercel"
-        ? "No execution runtime is configured. Set VERCEL_TOKEN (or VERCEL_OIDC_TOKEN and VERCEL_PROJECT_ID) and the R2_* credentials on the backend."
+        ? "No execution runtime is configured. Set VERCEL_TOKEN, VERCEL_PROJECT_ID and VERCEL_TEAM_ID on the backend (all three — the SDK takes a static token outside Vercel)."
         : "No execution runtime is configured. Set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET on the backend.",
     status: "error",
   });

@@ -18,7 +18,7 @@ import { Drive, Sandbox, type SandboxMounts } from "@vercel/sandbox";
 import { RuntimeOperationError, toRuntimeError } from "@dai/runtime";
 import type { AcquireOptions, RuntimeService, RuntimeState, Workspace as WorkspaceContract } from "@dai/runtime";
 import type { VercelRuntimeConfig } from "./config.js";
-import { driveName, sandboxName } from "./config.js";
+import { driveName, sandboxName, credentialsFromEnv } from "./config.js";
 import type { WorkspaceMirror } from "./mirror.js";
 import { VercelWorkspace } from "./workspace.js";
 
@@ -51,6 +51,15 @@ export class VercelRuntimeService implements RuntimeService {
     return this.config.namePrefix;
   }
 
+  /**
+   * `{token, projectId, teamId}` when static credentials are configured, else
+   * nothing and the SDK uses its OIDC context. Outside a Vercel deployment
+   * (Render, local) there is no OIDC context, so this is the only path.
+   */
+  private get authArgs(): Partial<{ token: string; projectId: string; teamId: string }> {
+    return this.config.credentials ?? credentialsFromEnv() ?? {};
+  }
+
   /** Resolve the tier, clamping rather than failing: a caller asking for 99 just wants the biggest box. */
   private tierFor(index?: number): { vcpus: number; label: string } {
     const tiers = this.config.tiers;
@@ -67,7 +76,7 @@ export class VercelRuntimeService implements RuntimeService {
    */
   private async existing(projectId: string): Promise<Sandbox | null> {
     try {
-      return await Sandbox.get({ name: sandboxName(this.config, projectId), resume: false });
+      return await Sandbox.get({ name: sandboxName(this.config, projectId), resume: false, ...this.authArgs });
     } catch (error) {
       if (isMissingSandbox(error)) return null;
       throw toRuntimeError(error, "Unable to reach the Sandbox for this project");
@@ -116,6 +125,7 @@ export class VercelRuntimeService implements RuntimeService {
           tags: { "dai.project": projectId },
           mounts,
           ...(env ? { env } : {}),
+          ...this.authArgs,
         });
       } catch (error) {
         // A name collision means another live sandbox already owns this project;
@@ -160,6 +170,7 @@ export class VercelRuntimeService implements RuntimeService {
       const cache = await Drive.getOrCreate({
         name: this.config.cacheDriveName,
         region: this.config.region,
+        ...this.authArgs,
       });
       mounts[this.config.cachePath] = cache.snapshot();
       return { mounts, usingCache: true };
@@ -180,7 +191,11 @@ export class VercelRuntimeService implements RuntimeService {
     if (!this.config.cacheDriveName) {
       throw new RuntimeOperationError("No dependency cache drive is configured (VERCEL_CACHE_DRIVE).", "invalid");
     }
-    const cache = await Drive.getOrCreate({ name: this.config.cacheDriveName, region: this.config.region });
+    const cache = await Drive.getOrCreate({
+      name: this.config.cacheDriveName,
+      region: this.config.region,
+      ...this.authArgs,
+    });
     const sandbox = await Sandbox.create({
       name: `${this.config.namePrefix}-cache-writer`,
       image: this.config.image,
@@ -189,6 +204,7 @@ export class VercelRuntimeService implements RuntimeService {
       resources: { vcpus: 1 },
       persistent: false,
       mounts: { [this.config.cachePath]: cache },
+      ...this.authArgs,
     });
     return new VercelWorkspace({
       sandbox,
@@ -205,6 +221,7 @@ export class VercelRuntimeService implements RuntimeService {
         name: driveName(this.config, projectId),
         region: this.config.region,
         maxSize: Math.min(this.config.maxProjectWorkspaceBytes, 10 * 1024 * 1024 * 1024),
+        ...this.authArgs,
       });
     } catch (error) {
       throw toRuntimeError(error, "Unable to open the project workspace drive");
@@ -291,7 +308,7 @@ export class VercelRuntimeService implements RuntimeService {
     await this.destroy(projectId).catch(() => undefined);
     const name = driveName(this.config, projectId);
     try {
-      const drive = await Drive.getOrCreate({ name, region: this.config.region });
+      const drive = await Drive.getOrCreate({ name, region: this.config.region, ...this.authArgs });
       await drive.delete();
     } catch (error) {
       if (!isMissingSandbox(error)) {
